@@ -36,6 +36,12 @@ for _stream in (sys.stdout, sys.stderr):
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("ai-pb-service")
+logger.setLevel(logging.INFO)
+
+# pykrx는 KRX 응답 오류 시 루트 로거(logging.info)에 직접 잘못된 포맷 인자를 넘겨
+# "Logging error" 스택트레이스를 대량으로 찍는 버그가 있다(기능상 무해하지만 실제
+# 에러를 로그에서 찾기 어렵게 만든다). 루트 로거 레벨을 올려 이 노이즈만 걸러낸다.
+logging.getLogger().setLevel(logging.WARNING)
 
 REPORT_PATH = Path(OUTPUT_PATH_DEFAULT)
 SCHEDULE_TIMEZONE = "Asia/Seoul"

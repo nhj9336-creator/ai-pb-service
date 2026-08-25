@@ -9,7 +9,7 @@ Gemini)에 전달하고, 엄격한 JSON 스키마로 응답을 받아 pb_report_
     OPENAI_API_KEY  - OpenAI API 키
     OPENAI_MODEL    - 기본값 "gpt-4o-mini"
     GEMINI_API_KEY  - Gemini API 키 (GOOGLE_API_KEY도 허용)
-    GEMINI_MODEL    - 기본값 "gemini-2.0-flash"
+    GEMINI_MODEL    - 기본값 "gemini-3.6-flash"
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ OUTPUT_PATH_DEFAULT = "pb_report_latest.json"
 MAX_GENERATION_ATTEMPTS = 2
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 # ---------------------------------------------------------------------------
 # 리포트 JSON 스키마 (프롬프트에 그대로 포함해 모델이 형식을 따르게 한다)
