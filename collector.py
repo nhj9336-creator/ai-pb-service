@@ -403,6 +403,20 @@ def collect_news_data(queries: Optional[list[str]] = None) -> dict:
 # 종합 수집 엔트리포인트
 # ---------------------------------------------------------------------------
 
+def _run_section(section_name: str, fn, *args, **kwargs) -> dict:
+    """수집 섹션 하나를 실행한다.
+
+    각 collect_* 함수는 이미 항목 단위(종목별/지표별)로 예외를 잡아 errors에
+    기록하지만, 혹시 그 방어망을 뚫고 섹션 함수 자체가 예상치 못한 예외를
+    던지더라도(예: pykrx/외부 라이브러리의 예상 밖 동작) 리포트 생성 전체가
+    죽지 않도록 한 겹 더 격리한다.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:
+        return {"data": {}, "errors": [f"[section:{section_name}] {exc}"]}
+
+
 def collect_market_data(target_date: DateLike = None) -> dict:
     """지정일 기준 종합 시장 데이터를 수집해 JSON 직렬화 가능한 dict로 반환한다.
 
@@ -416,12 +430,12 @@ def collect_market_data(target_date: DateLike = None) -> dict:
     """
     resolved_date = _to_date(target_date)
 
-    index_flow = collect_index_and_flow_data(resolved_date)
-    technical_domestic = collect_technical_data(resolved_date)
-    technical_us = collect_us_technical_data(resolved_date)
-    macro = collect_macro_data(resolved_date)
-    dart_disclosures = collect_dart_disclosures(resolved_date)
-    news = collect_news_data()
+    index_flow = _run_section("indices", collect_index_and_flow_data, resolved_date)
+    technical_domestic = _run_section("technical_domestic", collect_technical_data, resolved_date)
+    technical_us = _run_section("technical_us", collect_us_technical_data, resolved_date)
+    macro = _run_section("macro", collect_macro_data, resolved_date)
+    dart_disclosures = _run_section("dart", collect_dart_disclosures, resolved_date)
+    news = _run_section("news", collect_news_data)
 
     errors = (
         index_flow["errors"]
