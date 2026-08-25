@@ -22,3 +22,5 @@ services:
         sync: false
       - key: GEMINI_MODEL
         sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://ai-pb-service-7chm.vercel.app

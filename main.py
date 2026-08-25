@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 from contextlib import asynccontextmanager
@@ -113,10 +114,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI PB Service", description="AI 기반 Senior PB 리포트 API", version="1.0.0", lifespan=lifespan)
 
 # 웹 프론트엔드(별도 오리진)에서 API를 호출할 수 있도록 허용.
-# 운영 환경에서는 allow_origins를 실제 프론트엔드 도메인으로 제한할 것.
+# ALLOWED_ORIGINS 환경 변수(콤마 구분)로 배포 도메인을 지정하며, 미설정 시 운영 Vercel 도메인만 허용한다.
+_DEFAULT_ALLOWED_ORIGINS = "https://ai-pb-service-7chm.vercel.app"
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", _DEFAULT_ALLOWED_ORIGINS).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
