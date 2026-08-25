@@ -1,0 +1,467 @@
+"""수집된 시장 데이터를 바탕으로 Senior PB 수준의 종합 리포트를 생성하는 엔진.
+
+collector.collect_market_data()의 결과를 압축된 컨텍스트로 가공해 LLM(OpenAI 또는
+Gemini)에 전달하고, 엄격한 JSON 스키마로 응답을 받아 pb_report_latest.json에
+저장한다.
+
+필요 환경 변수 (.env 또는 시스템 환경 변수):
+    AI_PROVIDER     - "openai" | "gemini" (생략 시 설정된 API 키로 자동 판단)
+    OPENAI_API_KEY  - OpenAI API 키
+    OPENAI_MODEL    - 기본값 "gpt-4o-mini"
+    GEMINI_API_KEY  - Gemini API 키 (GOOGLE_API_KEY도 허용)
+    GEMINI_MODEL    - 기본값 "gemini-1.5-flash"
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import re
+from typing import Any, Optional
+
+from dotenv import load_dotenv
+
+from collector import DateLike, _to_date, collect_market_data
+
+load_dotenv()
+
+OUTPUT_PATH_DEFAULT = "pb_report_latest.json"
+MAX_GENERATION_ATTEMPTS = 2
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+
+# ---------------------------------------------------------------------------
+# 리포트 JSON 스키마 (프롬프트에 그대로 포함해 모델이 형식을 따르게 한다)
+# ---------------------------------------------------------------------------
+
+REPORT_JSON_TEMPLATE = {
+    "market_overview": {
+        "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석",
+        "pb_strategy_opinion": "매수 | 관망 | 비중축소 중 하나",
+        "strategy_rationale": "위 전략 의견을 제시한 근거 2~3문장",
+        "supply_demand_analysis": "국내 증시 기관/외국인 순매수 동향과 그 의미에 대한 해석 2~3문장",
+    },
+    "news_impact_analysis": [
+        {
+            "headline": "실제 수집된 뉴스 제목 중 하나를 그대로 인용",
+            "summary": "해당 뉴스의 핵심 내용 1~2문장 요약",
+            "impact": "이 뉴스가 시장/섹터에 미치는 파급 효과 분석 2~3문장",
+            "affected_sectors": ["영향받는 섹터/업종 목록"],
+        }
+    ],
+    "recommended_stocks": {
+        "domestic": [
+            {
+                "name": "종목명",
+                "ticker": "종목코드(예: 005930)",
+                "reason": "추천 이유",
+                "buy_point": "매수 관전 포인트(가격대, 이벤트, 기술적 신호 등)",
+                "risk": "투자 리스크",
+            }
+        ],
+        "us": [
+            {
+                "name": "종목명",
+                "ticker": "티커(예: AAPL)",
+                "reason": "추천 이유",
+                "buy_point": "매수 관전 포인트",
+                "risk": "투자 리스크",
+            }
+        ],
+    },
+    "financial_products": [
+        {
+            "type": "섹터ETF | 채권형 | MMF | 리츠 | 기타",
+            "name": "상품/자산군 이름",
+            "description": "상품 개요",
+            "allocation_reason": "현재 시장 상황에서 이 상품을 추천하는 이유 및 자산배분 전략",
+        }
+    ],
+    "portfolio_allocation": {
+        "assets": [
+            {"name": "국내주식", "percent": 30},
+            {"name": "미국주식", "percent": 25},
+            {"name": "채권/MMF", "percent": 20},
+            {"name": "리츠/대체투자", "percent": 10},
+            {"name": "현금성자산", "percent": 15},
+        ],
+        "rebalancing_strategy": "현재 시장 상황에 맞춘 리밸런싱 전략 2~3문장 (예: 비중 확대/축소할 자산군과 그 이유, 리밸런싱 주기 제안)",
+    },
+    "disclaimer": "투자 판단의 최종 책임은 투자자 본인에게 있다는 취지의 안내 문구",
+}
+
+REQUIRED_TOP_LEVEL_KEYS = (
+    "market_overview",
+    "news_impact_analysis",
+    "recommended_stocks",
+    "financial_products",
+    "portfolio_allocation",
+    "disclaimer",
+)
+
+VALID_STRATEGY_OPINIONS = {"매수", "관망", "비중축소"}
+
+
+# ---------------------------------------------------------------------------
+# 1. 수집 데이터 -> 프롬프트용 압축 컨텍스트
+# ---------------------------------------------------------------------------
+
+def _describe_trend(close: Optional[float], mas: dict[str, Optional[float]]) -> str:
+    values = [close, mas.get("ma5"), mas.get("ma20"), mas.get("ma60"), mas.get("ma120")]
+    if any(v is None for v in values):
+        return "판단불가(데이터 부족)"
+    if values == sorted(values, reverse=True):
+        return "상승추세(정배열)"
+    if values == sorted(values):
+        return "하락추세(역배열)"
+    return "혼조/박스권"
+
+
+def _condense_indices(indices: dict) -> dict:
+    condensed = {}
+    for name, snap in (indices or {}).items():
+        if not snap:
+            condensed[name] = None
+            continue
+        sd = snap.get("supply_demand")
+        condensed[name] = {
+            "date": snap.get("date"),
+            "close": snap.get("close"),
+            "change_pct": snap.get("change_pct"),
+            "institution_net_buy": sd.get("institution_net_buy") if sd else None,
+            "foreign_net_buy": sd.get("foreign_net_buy") if sd else None,
+        }
+    return condensed
+
+
+def _condense_technical(technical: dict) -> dict:
+    condensed = {}
+    for code, t in (technical or {}).items():
+        if not t:
+            condensed[code] = None
+            continue
+        mas = {w: (t.get(f"ma{w}") or [None])[-1] for w in ("5", "20", "60", "120")}
+        mas = {f"ma{k}": v for k, v in mas.items()}
+        close = (t.get("close") or [None])[-1]
+        condensed[code] = {
+            "name": t.get("name"),
+            "last_date": (t.get("dates") or [None])[-1],
+            "close": close,
+            "moving_averages": mas,
+            "trend": _describe_trend(close, mas),
+            "pivot_point": t.get("pivot_point"),
+            "support_resistance": t.get("support_resistance"),
+        }
+    return condensed
+
+
+def _condense_macro(macro: dict) -> dict:
+    condensed = {}
+    for name, series in (macro or {}).items():
+        if not series:
+            condensed[name] = None
+            continue
+        latest = series[-1]
+        prev = series[-2] if len(series) >= 2 else None
+        condensed[name] = {
+            "latest_date": latest.get("date"),
+            "latest_value": latest.get("value"),
+            "previous_value": prev.get("value") if prev else None,
+        }
+    return condensed
+
+
+def _condense_dart(dart: dict, limit_per_stock: int = 3) -> dict:
+    condensed = {}
+    for code, items in (dart or {}).items():
+        condensed[code] = [
+            {"corp_name": i.get("corp_name"), "report_nm": i.get("report_nm"), "rcept_dt": i.get("rcept_dt")}
+            for i in (items or [])[:limit_per_stock]
+        ]
+    return condensed
+
+
+def _condense_news(news: dict, limit_per_query: int = 5) -> list[dict]:
+    flattened = []
+    for query, items in (news or {}).items():
+        for i in (items or [])[:limit_per_query]:
+            flattened.append({"query": query, "title": i.get("title"), "source": i.get("source")})
+    return flattened
+
+
+def build_prompt_context(market_data: dict) -> dict:
+    """collect_market_data() 원본 결과를 LLM 프롬프트에 넣기 좋은 형태로 압축한다."""
+    technical = market_data.get("technical") or {}
+    return {
+        "target_date": market_data.get("meta", {}).get("target_date"),
+        "indices": _condense_indices(market_data.get("indices")),
+        "technical": {
+            "domestic": _condense_technical(technical.get("domestic")),
+            "us": _condense_technical(technical.get("us")),
+        },
+        "macro": _condense_macro(market_data.get("macro")),
+        "dart_disclosures": _condense_dart(market_data.get("dart_disclosures")),
+        "news": _condense_news(market_data.get("news")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 2. 프롬프트 구성
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = (
+    "당신은 20년 경력의 국내 대형 증권사 Senior PB(프라이빗뱅커)입니다. "
+    "고액 자산가 고객에게 매일 아침 배포하는 시장 브리핑 겸 자산관리 리포트를 작성합니다. "
+    "제공된 시장 데이터(지수, 수급, 기술적 지표, 거시경제, 공시, 뉴스)만을 근거로 분석하며, "
+    "데이터에 없는 사실을 지어내지 않습니다. "
+    "반드시 요청된 JSON 스키마와 동일한 키 구조로만 응답하고, JSON 이외의 설명이나 "
+    "마크다운 코드블록(```) 표시는 절대 포함하지 않습니다."
+)
+
+
+def build_user_prompt(context: dict) -> str:
+    schema_str = json.dumps(REPORT_JSON_TEMPLATE, ensure_ascii=False, indent=2)
+    context_str = json.dumps(context, ensure_ascii=False, indent=2)
+    return f"""아래는 {context.get('target_date')} 기준으로 수집된 시장 데이터입니다.
+
+[시장 데이터]
+{context_str}
+
+[작성 요구사항]
+1. 국내/미국 지수, 수급, 거시지표를 종합해 시장 흐름을 분석하고, PB로서 매수/관망/비중축소 중 하나의 전략 의견을 제시할 것. indices의 국내 지수(KOSPI/KOSDAQ) institution_net_buy/foreign_net_buy 수치를 근거로 기관/외국인 수급 동향을 별도로 해석할 것(supply_demand_analysis).
+2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
+3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것. ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
+4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
+5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
+6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic과 recommended_stocks.us는 각각 정확히 2개의 원소를 가질 것.
+
+[출력 JSON 스키마]
+{schema_str}
+"""
+
+
+# ---------------------------------------------------------------------------
+# 3. LLM 호출 (OpenAI / Gemini)
+# ---------------------------------------------------------------------------
+
+def _resolve_provider(provider: Optional[str]) -> str:
+    provider = provider or os.getenv("AI_PROVIDER")
+    if provider:
+        return provider.lower()
+    if os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+        return "gemini"
+    raise RuntimeError(
+        "AI_PROVIDER를 지정하거나 OPENAI_API_KEY / GEMINI_API_KEY(GOOGLE_API_KEY) 중 "
+        "하나를 환경 변수에 설정해야 합니다."
+    )
+
+
+def _call_openai(system_prompt: str, user_prompt: str) -> str:
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
+
+    client = OpenAI(api_key=api_key)
+    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.4,
+    )
+    return response.choices[0].message.content
+
+
+def _call_gemini(system_prompt: str, user_prompt: str) -> str:
+    import google.generativeai as genai
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY(GOOGLE_API_KEY) 환경 변수가 설정되지 않았습니다.")
+
+    genai.configure(api_key=api_key)
+    model_name = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+    response = model.generate_content(
+        user_prompt,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.4,
+        ),
+    )
+    return response.text
+
+
+def call_llm(system_prompt: str, user_prompt: str, provider: Optional[str] = None) -> str:
+    resolved = _resolve_provider(provider)
+    if resolved == "openai":
+        return _call_openai(system_prompt, user_prompt)
+    if resolved == "gemini":
+        return _call_gemini(system_prompt, user_prompt)
+    raise ValueError(f"지원하지 않는 AI_PROVIDER 입니다: {resolved} (openai | gemini)")
+
+
+# ---------------------------------------------------------------------------
+# 4. 응답 파싱 및 스키마 검증
+# ---------------------------------------------------------------------------
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
+
+
+def _extract_json(raw_text: str) -> dict:
+    text = raw_text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = _JSON_FENCE_RE.search(text)
+    if match:
+        return json.loads(match.group(1))
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return json.loads(text[start : end + 1])
+    raise ValueError("모델 응답에서 유효한 JSON을 추출하지 못했습니다.")
+
+
+def validate_report_schema(report: dict) -> None:
+    missing = [k for k in REQUIRED_TOP_LEVEL_KEYS if k not in report]
+    if missing:
+        raise ValueError(f"리포트에 필수 키가 없습니다: {missing}")
+
+    overview = report.get("market_overview", {})
+    opinion = overview.get("pb_strategy_opinion")
+    if opinion not in VALID_STRATEGY_OPINIONS:
+        raise ValueError(f"pb_strategy_opinion 값이 올바르지 않습니다: {opinion!r}")
+    if not overview.get("supply_demand_analysis"):
+        raise ValueError("market_overview.supply_demand_analysis가 비어있습니다.")
+
+    stocks = report.get("recommended_stocks", {})
+    for key in ("domestic", "us"):
+        items = stocks.get(key)
+        if not isinstance(items, list) or len(items) != 2:
+            raise ValueError(f"recommended_stocks.{key}는 정확히 2개의 종목이어야 합니다.")
+        for item in items:
+            required_fields = {"name", "ticker", "reason", "buy_point", "risk"}
+            if not required_fields.issubset(item):
+                raise ValueError(f"recommended_stocks.{key} 항목에 누락된 필드가 있습니다: {item}")
+
+    if not isinstance(report.get("news_impact_analysis"), list):
+        raise ValueError("news_impact_analysis는 리스트여야 합니다.")
+    if not isinstance(report.get("financial_products"), list):
+        raise ValueError("financial_products는 리스트여야 합니다.")
+
+    allocation = report.get("portfolio_allocation", {})
+    assets = allocation.get("assets")
+    if not isinstance(assets, list) or not assets:
+        raise ValueError("portfolio_allocation.assets는 비어있지 않은 리스트여야 합니다.")
+    total_percent = 0
+    for asset in assets:
+        if "name" not in asset or "percent" not in asset:
+            raise ValueError(f"portfolio_allocation.assets 항목에 name/percent가 필요합니다: {asset}")
+        total_percent += asset["percent"]
+    if not (95 <= total_percent <= 105):
+        raise ValueError(f"portfolio_allocation.assets의 percent 합계가 100에서 크게 벗어났습니다: {total_percent}")
+    if not allocation.get("rebalancing_strategy"):
+        raise ValueError("portfolio_allocation.rebalancing_strategy가 비어있습니다.")
+
+
+# ---------------------------------------------------------------------------
+# 5. 저장
+# ---------------------------------------------------------------------------
+
+def save_report(report: dict, output_path: str = OUTPUT_PATH_DEFAULT) -> str:
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# 6. 종합 엔트리포인트
+# ---------------------------------------------------------------------------
+
+def generate_pb_report(
+    target_date: DateLike = None,
+    provider: Optional[str] = None,
+    output_path: str = OUTPUT_PATH_DEFAULT,
+    market_data: Optional[dict] = None,
+) -> dict:
+    """시장 데이터를 수집(또는 재사용)하고 AI로 Senior PB 리포트를 생성해 파일로 저장한다.
+
+    Args:
+        target_date: 리포트 기준일. None이면 오늘.
+        provider: "openai" | "gemini". None이면 환경 변수로 자동 판단.
+        output_path: 저장할 JSON 파일 경로.
+        market_data: 이미 collect_market_data()로 수집한 결과가 있으면 재사용(중복 수집 방지).
+
+    Returns:
+        저장된 리포트 dict (meta, source_errors 포함).
+    """
+    resolved_date = _to_date(target_date)
+    market_data = market_data or collect_market_data(resolved_date)
+    context = build_prompt_context(market_data)
+
+    system_prompt = SYSTEM_PROMPT
+    user_prompt = build_user_prompt(context)
+
+    last_error: Optional[Exception] = None
+    report_body: Optional[dict] = None
+
+    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        try:
+            raw_text = call_llm(system_prompt, user_prompt, provider=provider)
+            parsed = _extract_json(raw_text)
+            validate_report_schema(parsed)
+            report_body = parsed
+            break
+        except Exception as exc:  # noqa: BLE001 - 재시도 후 최종 실패 시 위로 전파
+            last_error = exc
+            continue
+
+    if report_body is None:
+        raise RuntimeError(f"PB 리포트 생성에 {MAX_GENERATION_ATTEMPTS}회 실패했습니다: {last_error}")
+
+    # 프론트엔드가 캔들차트 등을 그릴 수 있도록 원본 시장 데이터(전체 OHLCV/이평선/지수/거시지표 등)를 함께 저장.
+    raw_market_data = {k: v for k, v in market_data.items() if k not in ("meta", "errors")}
+
+    report = {
+        "meta": {
+            "target_date": resolved_date.isoformat(),
+            "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "ai_provider": _resolve_provider(provider),
+        },
+        **report_body,
+        "market_data": raw_market_data,
+        "source_data_errors": market_data.get("errors", []),
+    }
+
+    save_report(report, output_path)
+    return report
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Senior PB 종합 리포트 생성기")
+    parser.add_argument("--date", dest="target_date", default=None, help="기준일 YYYY-MM-DD (기본값: 오늘)")
+    parser.add_argument("--provider", dest="provider", default=None, choices=["openai", "gemini"])
+    parser.add_argument("--output", dest="output_path", default=OUTPUT_PATH_DEFAULT)
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    result = generate_pb_report(
+        target_date=args.target_date,
+        provider=args.provider,
+        output_path=args.output_path,
+    )
+    print(f"PB 리포트가 저장되었습니다: {args.output_path}")
+    print(json.dumps(result, ensure_ascii=False, indent=2))

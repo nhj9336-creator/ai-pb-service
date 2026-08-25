@@ -1,0 +1,23 @@
+# 시장 데이터 수집
+yfinance
+pykrx
+
+# Open DART (전자공시) API 연동
+OpenDartReader
+
+# FRED (미국 거시경제 지표) API 연동
+fredapi
+
+# 뉴스 RSS 파싱
+feedparser
+
+# 백엔드 API 서버
+fastapi
+uvicorn[standard]
+
+# AI 브리핑 생성
+openai
+google-generativeai
+
+# 스케줄러 (자동 실행)
+apscheduler

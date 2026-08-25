@@ -1,0 +1,15 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# 백엔드 환경 변수 / 런타임 산출물
+.env
+pb_report_latest.json
+
+# Claude Code 세션 로컬 상태
+.claude/
+
+# 로그/임시 파일
+*.log
+*_pid.txt
