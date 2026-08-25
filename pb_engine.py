@@ -269,7 +269,8 @@ def _call_openai(system_prompt: str, user_prompt: str) -> str:
         raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
 
     client = OpenAI(api_key=api_key)
-    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    # getenv(key, default)는 환경변수가 "존재하지만 빈 문자열"인 경우 기본값을 쓰지 않으므로 or로 방어한다.
+    model = os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -290,7 +291,9 @@ def _call_gemini(system_prompt: str, user_prompt: str) -> str:
         raise RuntimeError("GEMINI_API_KEY(GOOGLE_API_KEY) 환경 변수가 설정되지 않았습니다.")
 
     genai.configure(api_key=api_key)
-    model_name = os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    # getenv(key, default)는 환경변수가 "존재하지만 빈 문자열"인 경우 기본값을 쓰지 않으므로 or로 방어한다.
+    # (예: Render에 GEMINI_MODEL을 빈 값으로 등록하면 SDK가 "models/"라는 깨진 모델명을 만들어 400 에러가 난다.)
+    model_name = os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
     model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
     response = model.generate_content(
         user_prompt,
