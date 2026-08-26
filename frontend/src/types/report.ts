@@ -3,10 +3,20 @@
 
 export type PbStrategyOpinion = "매수" | "관망" | "비중축소";
 
-export interface SupplyDemand {
+export interface SupplyDemandDay {
   date: string;
   institution_net_buy: number | null;
   foreign_net_buy: number | null;
+}
+
+export interface SupplyDemand extends SupplyDemandDay {
+  /** 최근 거래일들의 기관/외국인 순매수 시계열(매집 구간 분석용). */
+  history: SupplyDemandDay[];
+}
+
+export interface IndexPricePoint {
+  date: string;
+  close: number | null;
 }
 
 export interface IndexSnapshot {
@@ -15,6 +25,8 @@ export interface IndexSnapshot {
   change: number | null;
   change_pct: number | null;
   volume: number | null;
+  /** 최근 거래일들의 종가 시계열(매집 구간 분석용). */
+  price_history?: IndexPricePoint[];
   supply_demand?: SupplyDemand | null;
 }
 

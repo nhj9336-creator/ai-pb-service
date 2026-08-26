@@ -164,8 +164,10 @@ def _retry_with_backoff(fn: Callable[[], _T], *, context: str = "") -> _T:
 # 1. 국내/미국 지수 및 수급
 # ---------------------------------------------------------------------------
 
+SUPPLY_DEMAND_HISTORY_DAYS = 10  # 매집 구간 분석용으로 함께 제공할 최근 거래일 수
+
 def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
-    start = target_date - dt.timedelta(days=20)
+    start = target_date - dt.timedelta(days=30)
     end = target_date + dt.timedelta(days=1)
 
     def _fetch() -> pd.DataFrame:
@@ -184,24 +186,32 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
     prev_close = _safe_num(prev["Close"]) if prev is not None else None
     change = (last_close - prev_close) if (last_close is not None and prev_close is not None) else None
     change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
+
+    # 매집 구간 분석(수급 시계열과 가격대 대조)을 위해 최근 며칠의 종가도 함께 넘긴다.
+    # 이미 받아온 hist 윈도우를 재사용하므로 추가 API 호출은 없다.
+    recent = hist.tail(SUPPLY_DEMAND_HISTORY_DAYS)
+    price_history = [
+        {"date": idx.date().isoformat(), "close": _safe_num(row["Close"])} for idx, row in recent.iterrows()
+    ]
+
     return {
         "date": hist.index[-1].date().isoformat(),
         "close": last_close,
         "change": _safe_num(change),
         "change_pct": _safe_num(change_pct),
         "volume": _safe_int(last.get("Volume")),
+        "price_history": price_history,
     }
 
 
-def _fetch_krx_supply_demand(market: str, target_date: dt.date, max_lookback: int = 10) -> dict:
-    """target_date로부터 최대 max_lookback일 역순으로 최근 거래일 수급 데이터를 찾는다.
+def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
+    """target_date까지 최근 SUPPLY_DEMAND_HISTORY_DAYS 거래일치 기관/외국인 순매수 시계열을 가져온다.
 
     KRX의 투자자별 거래실적(기관/외국인 순매수) 엔드포인트는 data.krx.co.kr 로그인 세션을
     요구한다 - 비로그인 요청은 날짜/형식과 무관하게 서버가 HTTP 400 "LOGOUT"으로 즉시
     거부한다는 것을 실제 요청으로 확인했다. KRX_ID/KRX_PW 환경변수가 없으면 pykrx가 처음부터
-    비인증 세션으로 요청하므로, 여기서 미리 걸러 불필요한 최대 10회 요청을 반복하지 않고
-    정확한 사유로 즉시 실패한다. 두 환경변수를 설정하면(pykrx가 자동으로 사용) 아래 조회
-    로직이 정상적으로 동작하며 최근 영업일로 자동 폴백한다.
+    비인증 세션으로 요청하므로, 여기서 미리 걸러 불필요한 요청을 반복하지 않고 정확한 사유로
+    즉시 실패한다.
     """
     if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
         raise ValueError(
@@ -209,26 +219,36 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date, max_lookback: in
             "(KRX_ID/KRX_PW 환경변수 미설정 - data.krx.co.kr가 비로그인 요청을 거부함)."
         )
 
-    for offset in range(max_lookback):
-        d = target_date - dt.timedelta(days=offset)
-        date_str = d.strftime("%Y%m%d")
-        try:
-            df = krx.get_market_trading_value_by_date(date_str, date_str, market)
-        except Exception:
-            continue
-        if df is None or df.empty:
-            continue
-        row = df.iloc[-1]
-        institution_col = next((c for c in df.columns if "기관" in c), None)
-        foreign_col = next((c for c in df.columns if c.startswith("외국인")), None)
-        return {
-            "date": d.isoformat(),
+    # 주말/공휴일을 감안해 넉넉히 달력일 기준으로 조회한 뒤 실제 거래일만 남긴다.
+    start_str = (target_date - dt.timedelta(days=SUPPLY_DEMAND_HISTORY_DAYS * 2)).strftime("%Y%m%d")
+    end_str = target_date.strftime("%Y%m%d")
+
+    def _fetch() -> pd.DataFrame:
+        return krx.get_market_trading_value_by_date(start_str, end_str, market)
+
+    df = _retry_with_backoff(_fetch, context=f"flow:{market}")
+    if df is None or df.empty:
+        raise ValueError(f"{market}: {target_date} 기준 최근 수급 데이터를 찾을 수 없습니다.")
+
+    institution_col = next((c for c in df.columns if "기관" in c), None)
+    foreign_col = next((c for c in df.columns if c.startswith("외국인")), None)
+
+    df = df.sort_index().tail(SUPPLY_DEMAND_HISTORY_DAYS)
+    history = [
+        {
+            "date": idx.date().isoformat(),
             "institution_net_buy": _safe_int(row.get(institution_col)) if institution_col else None,
             "foreign_net_buy": _safe_int(row.get(foreign_col)) if foreign_col else None,
         }
-    raise ValueError(
-        f"{market}: {target_date} 기준 최근 {max_lookback}일 내 수급 데이터를 찾을 수 없습니다."
-    )
+        for idx, row in df.iterrows()
+    ]
+    latest = history[-1]
+    return {
+        "date": latest["date"],
+        "institution_net_buy": latest["institution_net_buy"],
+        "foreign_net_buy": latest["foreign_net_buy"],
+        "history": history,
+    }
 
 
 def collect_index_and_flow_data(target_date: dt.date) -> dict:
