@@ -110,30 +110,33 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
 
         <div className="space-y-4 text-sm leading-relaxed text-foreground/90">
           <section>
-            <p className="mb-1 font-semibold text-accent">1. Pivot Point (P, R1, S1)</p>
+            <p className="mb-1 font-semibold text-accent">1. Fibonacci Pivot Point (P, R1, S1)</p>
             <p className="text-muted">
-              전일 고가(H)·저가(L)·종가(C)만으로 당일 지지·저항 구간을 추정하는 전통적인 Floor
-              Trader&apos;s Pivot 공식입니다. 차트에는 가장 핵심적인 3개 선(P, R1, S1)만 표시됩니다.
+              최근 5거래일(주간 단위) 고가(H)·저가(L)와 최근 종가(C)로 스윙 구간의 지지·저항을
+              추정하는 피보나치 피봇 공식입니다. 전일 하루치 변동폭만 쓰는 일간 피봇보다 선 간격이
+              넓어 촘촘하게 몰리지 않습니다. 차트에는 가장 핵심적인 3개 선(P, R1, S1)만 표시됩니다.
             </p>
             <ul className="mt-1.5 space-y-0.5 rounded-lg border border-border/60 bg-surface-elevated p-2.5 font-mono text-xs text-foreground/80">
               <li>P (피봇) = (H + L + C) / 3</li>
-              <li>R1 (1차 저항) = 2P − L</li>
-              <li>S1 (1차 지지) = 2P − H</li>
+              <li>R1 (1차 저항) = P + 0.382 × (H − L)</li>
+              <li>S1 (1차 지지) = P − 0.382 × (H − L)</li>
             </ul>
             <ul className="mt-2 space-y-1.5 text-xs text-muted">
               <li>
-                <span className="font-semibold text-foreground/80">P(피봇) 부근:</span> 전일 매수·매도
-                세력의 균형점입니다. 현재가가 P 위면 단기 매수 우위, 아래면 매도 우위로 해석합니다.
+                <span className="font-semibold text-foreground/80">P(피봇) 부근:</span> 최근 한 주
+                매수·매도 세력의 균형점입니다. 현재가가 P 위면 단기 매수 우위, 아래면 매도 우위로
+                해석합니다.
               </li>
               <li>
                 <span className="font-semibold text-emerald-400">R1(저항) 돌파 시:</span> 매수세가
-                전일 고점 이상으로 강해졌다는 뜻입니다. 다만 거래량이 뒷받침되지 않으면 상단에서
-                되돌림(가짜 돌파)이 나올 확률이 높으니, 아래 거래량 항목과 함께 확인해야 합니다.
+                최근 주간 고점권 이상으로 강해졌다는 뜻입니다. 다만 거래량이 뒷받침되지 않으면
+                상단에서 되돌림(가짜 돌파)이 나올 확률이 높으니, 아래 거래량 항목과 함께 확인해야
+                합니다.
               </li>
               <li>
                 <span className="font-semibold text-rose-400">S1(지지) 이탈 시:</span> 매도세가
-                전일 저점 이하까지 우위를 점했다는 뜻으로, 추세 전환 가능성을 열어두고 손절/비중
-                축소를 검토해야 하는 신호로 해석합니다.
+                최근 주간 저점권 이하까지 우위를 점했다는 뜻으로, 추세 전환 가능성을 열어두고
+                손절/비중 축소를 검토해야 하는 신호로 해석합니다.
               </li>
             </ul>
           </section>

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { forwardRef, type CSSProperties, type ReactNode } from "react";
 
 interface SectionCardProps {
   title: string;
@@ -6,11 +6,17 @@ interface SectionCardProps {
   subtitle?: string;
   children: ReactNode;
   className?: string;
+  style?: CSSProperties;
 }
 
-export default function SectionCard({ title, icon, subtitle, children, className }: SectionCardProps) {
+const SectionCard = forwardRef<HTMLElement, SectionCardProps>(function SectionCard(
+  { title, icon, subtitle, children, className, style },
+  ref
+) {
   return (
     <section
+      ref={ref}
+      style={style}
       className={`rounded-2xl border border-border bg-surface p-5 shadow-lg shadow-black/20 ${className ?? ""}`}
     >
       <div className="mb-4 flex items-baseline justify-between gap-3">
@@ -23,4 +29,6 @@ export default function SectionCard({ title, icon, subtitle, children, className
       {children}
     </section>
   );
-}
+});
+
+export default SectionCard;

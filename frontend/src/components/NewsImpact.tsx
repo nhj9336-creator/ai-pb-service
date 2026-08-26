@@ -1,17 +1,39 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SectionCard from "./SectionCard";
 import type { NewsImpactAnalysis } from "@/types/report";
 
 const DEFAULT_VISIBLE = 3;
 
-export default function NewsImpact({ items }: { items: NewsImpactAnalysis[] }) {
+interface NewsImpactProps {
+  items: NewsImpactAnalysis[];
+  /** 렌더링된 카드의 실제 높이(px)를 부모에 알려 DART 공시 카드가 동일한 높이로 맞출 수 있게 한다. */
+  onHeightChange?: (height: number) => void;
+}
+
+export default function NewsImpact({ items, onHeightChange }: NewsImpactProps) {
   const [expanded, setExpanded] = useState(false);
+  const cardRef = useRef<HTMLElement | null>(null);
+
+  // 그리드 stretch에 기대지 않고, 실제 렌더된 카드 높이를 측정해 형제 카드(DART)에 전달한다
+  // (그리드의 auto 행 높이 계산은 자식의 overflow-hidden 클리핑을 반영하지 않아 정확한
+  // 동기화가 어렵기 때문).
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el || !onHeightChange) return;
+
+    const report = () => onHeightChange(el.offsetHeight);
+    report();
+
+    const observer = new ResizeObserver(report);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onHeightChange, items, expanded]);
 
   if (!items || items.length === 0) {
     return (
-      <SectionCard title="뉴스 파급력 분석" icon={<span>📰</span>}>
+      <SectionCard ref={cardRef} title="뉴스 파급력 분석" icon={<span>📰</span>} className="self-start">
         <p className="text-sm text-muted">분석된 주요 뉴스가 없습니다.</p>
       </SectionCard>
     );
@@ -20,7 +42,13 @@ export default function NewsImpact({ items }: { items: NewsImpactAnalysis[] }) {
   const visible = expanded ? items : items.slice(0, DEFAULT_VISIBLE);
 
   return (
-    <SectionCard title="뉴스 파급력 분석" icon={<span>📰</span>} subtitle={`총 ${items.length}건`}>
+    <SectionCard
+      ref={cardRef}
+      title="뉴스 파급력 분석"
+      icon={<span>📰</span>}
+      subtitle={`총 ${items.length}건`}
+      className="self-start"
+    >
       <ul className="space-y-3">
         {visible.map((item, idx) => (
           <li key={idx} className="rounded-lg border border-border/60 bg-surface-elevated p-3">

@@ -100,6 +100,7 @@ MA_WINDOWS = (5, 20, 60, 120)
 CHART_HISTORY_START_DATE = dt.date(2024, 1, 1)  # 인터랙티브 차트 조회 시작일(약 2.5년치)
 OHLCV_MAX_BARS = 800  # 페이로드 폭주 방지용 안전 상한(2024-01 기준 실제 거래일수보다 넉넉함)
 TREND_CHANNEL_LOOKBACK = 60  # 대각선 추세선(고점-고점/저점-저점) 계산에 사용할 최근 거래일수
+PIVOT_LOOKBACK_DAYS = 5  # 피봇 포인트 계산에 사용할 최근 거래일수(주간 단위 - 전일 단순 피봇 대비 굵직한 지지/저항선)
 DART_LOOKBACK_DAYS = 7
 DART_UNIVERSE_SIZE = 20  # DART 공시를 조회할 시가총액 상위 종목 수
 DART_DISCLOSURES_PER_STOCK = 3  # 종목당 프롬프트에 넘길 최근 공시 개수(유니버스 확대에 따른 과다 방지)
@@ -389,14 +390,33 @@ def collect_index_and_flow_data(target_date: dt.date) -> dict:
 # ---------------------------------------------------------------------------
 
 def _compute_pivot_levels(df: pd.DataFrame) -> dict:
-    last = df.iloc[-1]
-    high, low, close = _safe_num(last["고가"]), _safe_num(last["저가"]), _safe_num(last["종가"])
+    """최근 PIVOT_LOOKBACK_DAYS 거래일(주간 단위)의 고가/저가와 최근 종가로 피보나치 피봇을
+    계산한다. 전일 단순(Daily Floor Trader's) 피봇은 하루짜리 변동폭만 반영해 지지/저항선이
+    현재가 근처에 촘촘하게 몰리는 문제가 있어, 스윙 타임프레임에 맞는 주간 고가/저가 기준으로
+    바꾸고 간격도 피보나치 비율(0.382, 0.618)로 넓게 전개한다.
+
+    Fibonacci Pivot Points:
+        P  = (WeeklyHigh + WeeklyLow + Close) / 3
+        R1 = P + 0.382 * (WeeklyHigh - WeeklyLow)
+        S1 = P - 0.382 * (WeeklyHigh - WeeklyLow)
+        R2 = P + 0.618 * (WeeklyHigh - WeeklyLow)
+        S2 = P - 0.618 * (WeeklyHigh - WeeklyLow)
+    """
+    empty = {"pivot": None, "resistance_1": None, "resistance_2": None, "support_1": None, "support_2": None}
+
+    window = df.tail(PIVOT_LOOKBACK_DAYS)
+    if window.empty:
+        return empty
+
+    high, low = _safe_num(window["고가"].max()), _safe_num(window["저가"].min())
+    close = _safe_num(df.iloc[-1]["종가"])
     if high is None or low is None or close is None:
-        return {"pivot": None, "resistance_1": None, "resistance_2": None, "support_1": None, "support_2": None}
+        return empty
 
     pivot = (high + low + close) / 3
-    r1, s1 = 2 * pivot - low, 2 * pivot - high
-    r2, s2 = pivot + (high - low), pivot - (high - low)
+    diff = high - low
+    r1, s1 = pivot + 0.382 * diff, pivot - 0.382 * diff
+    r2, s2 = pivot + 0.618 * diff, pivot - 0.618 * diff
     return {
         "pivot": _safe_num(pivot),
         "resistance_1": _safe_num(r1),

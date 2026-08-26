@@ -1,3 +1,6 @@
+"use client";
+
+import { useCallback, useState } from "react";
 import SectionCard from "./SectionCard";
 import StrategyBadge from "./StrategyBadge";
 import SupplyDemandBadge from "./SupplyDemandBadge";
@@ -15,6 +18,10 @@ const SUPPLY_DEMAND_ACCENT: Record<string, string> = {
 export default function CentralReport({ report }: { report: PbReport }) {
   const { market_overview } = report;
   const accent = SUPPLY_DEMAND_ACCENT[market_overview.supply_demand_status] ?? "border-l-border";
+  // DART 공시 카드가 뉴스 카드와 정확히 같은 높이가 되도록, 뉴스 카드가 측정한 실제 렌더
+  // 높이를 그대로 전달한다.
+  const [newsCardHeight, setNewsCardHeight] = useState<number | null>(null);
+  const handleNewsHeightChange = useCallback((height: number) => setNewsCardHeight(height), []);
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <SectionCard title="시장 총평" icon={<span>🧭</span>} className="xl:col-span-2">
@@ -37,8 +44,8 @@ export default function CentralReport({ report }: { report: PbReport }) {
         </div>
       </SectionCard>
 
-      <NewsImpact items={report.news_impact_analysis} />
-      <DartAnnouncements dart={report.market_data.dart_disclosures} />
+      <NewsImpact items={report.news_impact_analysis} onHeightChange={handleNewsHeightChange} />
+      <DartAnnouncements dart={report.market_data.dart_disclosures} matchHeight={newsCardHeight} />
     </div>
   );
 }

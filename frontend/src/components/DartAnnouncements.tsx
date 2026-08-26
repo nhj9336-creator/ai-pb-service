@@ -5,11 +5,18 @@ import SectionCard from "./SectionCard";
 import type { DartDisclosure, MarketData } from "@/types/report";
 import { formatDateLabel } from "@/lib/format";
 
-// 화면에 노출 가능한 전체 공시 상한(그리드 옆 뉴스 카드와 동일 행 높이로 자동으로 채워지고,
-// 넘치는 항목만 "더보기"로 열람 - 고정된 3개 제한 대신 실제 렌더 높이로 넘침 여부를 판단한다).
+// 화면에 노출 가능한 전체 공시 상한(왼쪽 뉴스 카드와 높이를 맞춘 뒤, 넘치는 항목만
+// "더보기"로 열람 - 고정된 3개 제한 대신 실제 렌더 높이로 넘침 여부를 판단한다).
 const MAX_VISIBLE = 30;
 
-export default function DartAnnouncements({ dart }: { dart: MarketData["dart_disclosures"] }) {
+export default function DartAnnouncements({
+  dart,
+  matchHeight,
+}: {
+  dart: MarketData["dart_disclosures"];
+  /** 왼쪽 뉴스 카드의 실제 렌더 높이(px). 값이 있으면 접힌 상태에서 이 높이에 정확히 맞춘다. */
+  matchHeight?: number | null;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -29,11 +36,15 @@ export default function DartAnnouncements({ dart }: { dart: MarketData["dart_dis
 
     window.addEventListener("resize", checkOverflow);
     return () => window.removeEventListener("resize", checkOverflow);
-  }, [items, expanded]);
+  }, [items, expanded, matchHeight]);
+
+  // 접힌 상태에서는 뉴스 카드와 정확히 같은 높이로 고정하고(그 안에 딱 들어오는 만큼만 노출),
+  // 펼친 상태에서는 높이 제한을 풀어 전체 목록이 자연스럽게 늘어나도록 한다.
+  const cardStyle = !expanded && matchHeight ? { height: matchHeight } : undefined;
 
   if (items.length === 0) {
     return (
-      <SectionCard title="DART 주요 공시" icon={<span>📑</span>}>
+      <SectionCard title="DART 주요 공시" icon={<span>📑</span>} className="self-start" style={cardStyle}>
         <p className="text-sm text-muted">최근 주요 공시가 없습니다.</p>
       </SectionCard>
     );
@@ -44,10 +55,9 @@ export default function DartAnnouncements({ dart }: { dart: MarketData["dart_dis
       title="DART 주요 공시"
       icon={<span>📑</span>}
       subtitle={`총 ${items.length}건`}
-      className="flex h-full flex-col"
+      className="flex flex-col self-start"
+      style={cardStyle}
     >
-      {/* min-h-0 + overflow-hidden 조합으로 옆 뉴스 카드와 같은 행 높이(그리드 stretch)만큼만
-          자연스럽게 채우고, 넘치는 항목은 더보기 클릭 전까지 시각적으로만 숨긴다. */}
       <div ref={listRef} className={`relative min-h-0 flex-1 ${expanded ? "" : "overflow-hidden"}`}>
         <ul className="space-y-2">
           {items.map((item) => (
