@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -51,8 +52,62 @@ class GenerationInProgressError(RuntimeError):
     """이미 다른 리포트 생성 작업이 진행 중일 때 발생."""
 
 
-# 스케줄러 작업과 수동 트리거(/api/generate-now)가 동시에 겹쳐 파일을 쓰지 않도록 보호
+# 스케줄러 작업과 수동 트리거(/api/generate-now)가 동시에 겹쳐 파일을 쓰지 않도록 보호.
+# 정상 종료 시에는 finally에서 항상 해제되지만(원래도 그랬음), 클라이언트/프록시가
+# 응답을 기다리다 타임아웃되어도 서버 스레드는 계속 실행되므로 - 그 사이 락은 여전히
+# "정당하게" 점유된 상태다. 다만 예상치 못한 하드행(hang) 등 만약의 경우에 대비해
+# TTL을 넘기면 죽은 락으로 간주하고 강제로 회수하는 워치독을 추가한다.
 _generation_lock = threading.Lock()
+_generation_started_monotonic: Optional[float] = None
+GENERATION_LOCK_TTL_SECONDS = 120  # 2분
+
+
+def _acquire_generation_lock() -> bool:
+    global _generation_started_monotonic
+
+    if _generation_lock.acquire(blocking=False):
+        _generation_started_monotonic = time.monotonic()
+        return True
+
+    started = _generation_started_monotonic
+    if started is not None and (time.monotonic() - started) > GENERATION_LOCK_TTL_SECONDS:
+        logger.warning(
+            "리포트 생성 락이 %d초 넘게 유지되어 정체된 것으로 판단, 강제로 회수합니다.",
+            GENERATION_LOCK_TTL_SECONDS,
+        )
+        try:
+            _generation_lock.release()
+        except RuntimeError:
+            pass  # 그 사이 원래 작업이 정상 종료하며 이미 해제한 경우
+        if _generation_lock.acquire(blocking=False):
+            _generation_started_monotonic = time.monotonic()
+            return True
+
+    return False
+
+
+def _release_generation_lock() -> None:
+    global _generation_started_monotonic
+    _generation_started_monotonic = None
+    try:
+        _generation_lock.release()
+    except RuntimeError:
+        pass  # TTL 워치독이 그 사이 이미 강제 회수한 경우 대비
+
+
+def reset_generation_lock() -> None:
+    """서버 시작 시 잠금 상태를 명시적으로 초기화한다(신규 프로세스라 이미 비어있지만,
+    상태를 명확히 하고 향후 리팩터링에도 안전하도록 방어적으로 호출한다)."""
+    global _generation_started_monotonic
+    if _generation_lock.locked():
+        try:
+            _generation_lock.release()
+        except RuntimeError:
+            pass
+    _generation_started_monotonic = None
+    _generation_status.update(running=False, last_error=None)
+
+
 _generation_status: dict[str, Any] = {
     "running": False,
     "last_started_at": None,
@@ -64,7 +119,7 @@ _generation_status: dict[str, Any] = {
 
 def run_report_pipeline(target_date: Optional[str] = None, provider: Optional[str] = None) -> dict:
     """collector + pb_engine 파이프라인을 1회 실행한다. 스케줄러/엔드포인트 공용 진입점."""
-    if not _generation_lock.acquire(blocking=False):
+    if not _acquire_generation_lock():
         raise GenerationInProgressError("이미 리포트 생성이 진행 중입니다. 잠시 후 다시 시도하세요.")
 
     _generation_status.update(running=True, last_started_at=_now_iso(), last_error=None)
@@ -81,7 +136,7 @@ def run_report_pipeline(target_date: Optional[str] = None, provider: Optional[st
         raise
     finally:
         _generation_status.update(running=False, last_finished_at=_now_iso())
-        _generation_lock.release()
+        _release_generation_lock()
 
 
 def _now_iso() -> str:
@@ -111,6 +166,7 @@ scheduler.add_job(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    reset_generation_lock()
     scheduler.start()
     logger.info("스케줄러 시작: 매일 08:00(Asia/Seoul) PB 리포트 자동 갱신 등록됨")
     yield

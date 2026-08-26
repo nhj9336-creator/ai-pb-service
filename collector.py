@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Optional, TypeVar, Union
 from urllib.parse import quote
 
@@ -102,6 +103,8 @@ TREND_CHANNEL_LOOKBACK = 60  # 대각선 추세선(고점-고점/저점-저점) 
 DART_LOOKBACK_DAYS = 7
 DART_UNIVERSE_SIZE = 20  # DART 공시를 조회할 시가총액 상위 종목 수
 DART_DISCLOSURES_PER_STOCK = 3  # 종목당 프롬프트에 넘길 최근 공시 개수(유니버스 확대에 따른 과다 방지)
+DART_MAX_WORKERS = 5  # DART 공시 조회 동시 요청 수 상한
+NEWS_MAX_WORKERS = 4  # 뉴스 RSS 쿼리 동시 요청 수 상한
 NEWS_ITEMS_PER_QUERY = 5
 FRED_LOOKBACK_OBS = 24
 
@@ -330,39 +333,50 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
     }
 
 
+def _fetch_single_index(name: str, ticker: str, target_date: dt.date) -> dict:
+    """지수 하나를 가져온다. KOSPI/KOSDAQ는 KRX 공식 수치를 우선 시도하고(야후 미러보다
+    권위 있는 1차 소스), 실패하면 조용히 yfinance로 폴백한다."""
+    if name in KRX_OFFICIAL_INDEX_TICKERS:
+        try:
+            return _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
+        except Exception:
+            pass
+    return _fetch_yf_index_snapshot(ticker, target_date)
+
+
 def collect_index_and_flow_data(target_date: dt.date) -> dict:
-    result: dict = {}
     errors: list[str] = []
 
-    for idx, (name, ticker) in enumerate(GLOBAL_INDEX_TICKERS.items()):
-        if idx > 0:
-            time.sleep(REQUEST_DELAY_SEC)
-
-        # KOSPI/KOSDAQ는 KRX 공식 수치를 우선 시도한다(야후 미러보다 권위 있는 1차 소스).
-        # 실패해도 조용히 yfinance로 폴백하므로 별도 에러를 남기지 않는다.
-        if name in KRX_OFFICIAL_INDEX_TICKERS:
+    # 1단계: 지수 스냅샷을 병렬로 조회한다.
+    result: dict = {}
+    with ThreadPoolExecutor(max_workers=len(GLOBAL_INDEX_TICKERS)) as executor:
+        future_to_name = {
+            executor.submit(_fetch_single_index, name, ticker, target_date): name
+            for name, ticker in GLOBAL_INDEX_TICKERS.items()
+        }
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
             try:
-                result[name] = _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
-                continue
-            except Exception:
-                pass
+                result[name] = future.result()
+            except Exception as exc:
+                result[name] = None
+                errors.append(f"[index:{name}] {exc}")
 
-        try:
-            result[name] = _fetch_yf_index_snapshot(ticker, target_date)
-        except Exception as exc:
-            result[name] = None
-            errors.append(f"[index:{name}] {exc}")
-
-    for idx, (name, market) in enumerate(KRX_SUPPLY_DEMAND_MARKETS.items()):
-        if idx > 0:
-            time.sleep(REQUEST_DELAY_SEC)
-        if result.get(name) is None:
-            continue
-        try:
-            result[name]["supply_demand"] = _fetch_krx_supply_demand(market, target_date)
-        except Exception as exc:
-            result[name]["supply_demand"] = None
-            errors.append(f"[flow:{name}] {exc}")
+    # 2단계: 위에서 성공한 국내 지수에 한해 수급(기관/외국인 순매수)을 병렬로 덧붙인다.
+    targets = {name: market for name, market in KRX_SUPPLY_DEMAND_MARKETS.items() if result.get(name) is not None}
+    if targets:
+        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
+            future_to_name = {
+                executor.submit(_fetch_krx_supply_demand, market, target_date): name
+                for name, market in targets.items()
+            }
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    result[name]["supply_demand"] = future.result()
+                except Exception as exc:
+                    result[name]["supply_demand"] = None
+                    errors.append(f"[flow:{name}] {exc}")
 
     return {"data": result, "errors": errors}
 
@@ -523,36 +537,46 @@ def _fetch_us_stock_technical(ticker: str, name: str, target_date: dt.date) -> d
     return _build_technical_payload(df, name)
 
 
-def collect_technical_data(target_date: dt.date, stocks: Optional[dict] = None) -> dict:
-    """국내(KRX) 종목의 기술적 지표를 수집한다."""
-    stocks = stocks or MAJOR_STOCKS
+TECHNICAL_MAX_WORKERS = 4  # 동시 KRX/yfinance 요청 수 상한(과도한 병렬은 레이트리밋 위험이 있어 제한)
+
+
+def _parallel_fetch(
+    items: dict[str, str],
+    fetch_fn: Callable[[str, str, dt.date], dict],
+    target_date: dt.date,
+    error_prefix: str,
+    max_workers: int = TECHNICAL_MAX_WORKERS,
+) -> dict:
+    """{키: 이름} 목록을 fetch_fn(키, 이름, target_date)로 병렬 수집한다.
+
+    개별 항목 실패는 서로 격리되어(한 종목 실패가 다른 종목에 영향 없음) errors에 기록되고
+    result[키]는 None으로 남는다. max_workers로 동시 요청 수를 제한해 외부 API 레이트리밋을
+    피하면서도, 기존 순차 처리(항목당 지연 포함) 대비 전체 소요 시간을 크게 단축한다.
+    """
     result: dict = {}
     errors: list[str] = []
-    for idx, (code, name) in enumerate(stocks.items()):
-        if idx > 0:
-            time.sleep(REQUEST_DELAY_SEC)
-        try:
-            result[code] = _fetch_stock_technical(code, name, target_date)
-        except Exception as exc:
-            result[code] = None
-            errors.append(f"[technical:{code}] {exc}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_key = {executor.submit(fetch_fn, key, name, target_date): key for key, name in items.items()}
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                result[key] = future.result()
+            except Exception as exc:
+                result[key] = None
+                errors.append(f"[{error_prefix}:{key}] {exc}")
     return {"data": result, "errors": errors}
+
+
+def collect_technical_data(target_date: dt.date, stocks: Optional[dict] = None) -> dict:
+    """국내(KRX) 종목의 기술적 지표를 병렬로 수집한다."""
+    stocks = stocks or MAJOR_STOCKS
+    return _parallel_fetch(stocks, _fetch_stock_technical, target_date, "technical")
 
 
 def collect_us_technical_data(target_date: dt.date, stocks: Optional[dict] = None) -> dict:
-    """미국 종목의 기술적 지표를 수집한다."""
+    """미국 종목의 기술적 지표를 병렬로 수집한다."""
     stocks = stocks or US_STOCKS
-    result: dict = {}
-    errors: list[str] = []
-    for idx, (ticker, name) in enumerate(stocks.items()):
-        if idx > 0:
-            time.sleep(REQUEST_DELAY_SEC)
-        try:
-            result[ticker] = _fetch_us_stock_technical(ticker, name, target_date)
-        except Exception as exc:
-            result[ticker] = None
-            errors.append(f"[technical_us:{ticker}] {exc}")
-    return {"data": result, "errors": errors}
+    return _parallel_fetch(stocks, _fetch_us_stock_technical, target_date, "technical_us")
 
 
 # ---------------------------------------------------------------------------
@@ -670,17 +694,26 @@ def collect_dart_disclosures(target_date: dt.date, stocks: Optional[dict] = None
             "errors": ["DART_API_KEY 환경 변수가 없거나 OpenDartReader 패키지가 설치되지 않았습니다."],
         }
 
+    # OpenDartReader 생성 시 전체 법인코드 목록을 내려받아 당일 캐시에 저장하므로, 스레드마다
+    # 새로 생성하면 캐시 파일에 동시 쓰기 경쟁이 생길 수 있다. 여기서 한 번만 만들고
+    # 이후 조회(.list())만 여러 스레드가 공유해서 병렬로 사용한다.
     dart = OpenDartReader(api_key)
     result: dict = {}
-    for code, name in stocks.items():
-        try:
-            result[code] = _fetch_dart_disclosures(dart, code, name, target_date)
-        except Exception as exc:
-            # 개별 종목의 DART 조회 실패(우선주/스팩 등 법인코드 불일치, 일시 오류 등)는
-            # 흔하고 무해한 상황이라 사용자 화면(source_data_errors)에는 절대 노출하지
-            # 않는다. 서버 로그에만 남겨 운영자가 필요 시 확인할 수 있게 한다.
-            result[code] = []
-            logger.warning("[dart:%s] 공시 조회 실패(사용자 화면에는 노출하지 않음): %s", code, exc)
+    with ThreadPoolExecutor(max_workers=DART_MAX_WORKERS) as executor:
+        future_to_code = {
+            executor.submit(_fetch_dart_disclosures, dart, code, name, target_date): code
+            for code, name in stocks.items()
+        }
+        for future in as_completed(future_to_code):
+            code = future_to_code[future]
+            try:
+                result[code] = future.result()
+            except Exception as exc:
+                # 개별 종목의 DART 조회 실패(우선주/스팩 등 법인코드 불일치, 일시 오류 등)는
+                # 흔하고 무해한 상황이라 사용자 화면(source_data_errors)에는 절대 노출하지
+                # 않는다. 서버 로그에만 남겨 운영자가 필요 시 확인할 수 있게 한다.
+                result[code] = []
+                logger.warning("[dart:%s] 공시 조회 실패(사용자 화면에는 노출하지 않음): %s", code, exc)
     return {"data": result, "errors": []}
 
 
@@ -709,12 +742,15 @@ def collect_news_data(queries: Optional[list[str]] = None) -> dict:
     queries = queries or NEWS_RSS_QUERIES
     result: dict = {}
     errors: list[str] = []
-    for q in queries:
-        try:
-            result[q] = _fetch_google_news(q, NEWS_ITEMS_PER_QUERY)
-        except Exception as exc:
-            result[q] = []
-            errors.append(f"[news:{q}] {exc}")
+    with ThreadPoolExecutor(max_workers=NEWS_MAX_WORKERS) as executor:
+        future_to_query = {executor.submit(_fetch_google_news, q, NEWS_ITEMS_PER_QUERY): q for q in queries}
+        for future in as_completed(future_to_query):
+            q = future_to_query[future]
+            try:
+                result[q] = future.result()
+            except Exception as exc:
+                result[q] = []
+                errors.append(f"[news:{q}] {exc}")
     return {"data": result, "errors": errors}
 
 
@@ -749,12 +785,30 @@ def collect_market_data(target_date: DateLike = None) -> dict:
     """
     resolved_date = _to_date(target_date)
 
-    index_flow = _run_section("indices", collect_index_and_flow_data, resolved_date)
-    technical_domestic = _run_section("technical_domestic", collect_technical_data, resolved_date)
-    technical_us = _run_section("technical_us", collect_us_technical_data, resolved_date)
-    macro = _run_section("macro", collect_macro_data, resolved_date)
-    dart_disclosures = _run_section("dart", collect_dart_disclosures, resolved_date)
-    news = _run_section("news", collect_news_data)
+    # 6개 섹션은 서로 데이터 의존성이 없으므로(indices/technical_domestic/technical_us/
+    # macro/dart/news) 순차 실행 대신 동시에 실행해 전체 소요 시간을 단축한다. 각 섹션은
+    # 이미 내부적으로도 병렬화되어 있고 _run_section이 예외를 흡수하므로, 여기서 하나가
+    # 오래 걸리거나 실패해도 다른 섹션에는 영향이 없다.
+    section_jobs = {
+        "indices": (collect_index_and_flow_data, (resolved_date,)),
+        "technical_domestic": (collect_technical_data, (resolved_date,)),
+        "technical_us": (collect_us_technical_data, (resolved_date,)),
+        "macro": (collect_macro_data, (resolved_date,)),
+        "dart": (collect_dart_disclosures, (resolved_date,)),
+        "news": (collect_news_data, ()),
+    }
+    with ThreadPoolExecutor(max_workers=len(section_jobs)) as executor:
+        future_to_section = {
+            executor.submit(_run_section, name, fn, *args): name for name, (fn, args) in section_jobs.items()
+        }
+        sections = {future_to_section[future]: future.result() for future in as_completed(future_to_section)}
+
+    index_flow = sections["indices"]
+    technical_domestic = sections["technical_domestic"]
+    technical_us = sections["technical_us"]
+    macro = sections["macro"]
+    dart_disclosures = sections["dart"]
+    news = sections["news"]
 
     errors = (
         index_flow["errors"]

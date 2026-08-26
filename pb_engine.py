@@ -29,6 +29,7 @@ load_dotenv()
 
 OUTPUT_PATH_DEFAULT = "pb_report_latest.json"
 MAX_GENERATION_ATTEMPTS = 2
+LLM_TIMEOUT_SECONDS = 90  # LLM 응답이 이보다 오래 걸리면 실패로 간주하고 재시도/에러 처리한다
 
 # 추천 종목 개수는 collector의 종목 유니버스 크기와 항상 일치시킨다(유니버스 전체가
 # 분석·랭킹되어 프론트엔드 "더보기"로 전부 확인 가능하도록).
@@ -363,7 +364,9 @@ def _call_openai(system_prompt: str, user_prompt: str) -> str:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
 
-    client = OpenAI(api_key=api_key)
+    # SDK 기본 타임아웃(수 분)이 너무 길어, 네트워크 문제 시 요청 락이 장시간 묶이는
+    # 원인이 될 수 있다. 명시적으로 짧게 설정해 빠르게 실패하고 재시도하게 한다.
+    client = OpenAI(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS)
     # getenv(key, default)는 환경변수가 "존재하지만 빈 문자열"인 경우 기본값을 쓰지 않으므로 or로 방어한다.
     model = os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
     response = client.chat.completions.create(
@@ -396,6 +399,9 @@ def _call_gemini(system_prompt: str, user_prompt: str) -> str:
             response_mime_type="application/json",
             temperature=0.4,
         ),
+        # SDK 기본 타임아웃이 너무 길어질 수 있어 명시적으로 짧게 설정한다(요청 락 장시간
+        # 점유 방지).
+        request_options={"timeout": LLM_TIMEOUT_SECONDS},
     )
     return response.text
 
