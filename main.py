@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
 from collector import collect_market_data
-from pb_engine import OUTPUT_PATH_DEFAULT, generate_pb_report
+from pb_engine import OUTPUT_PATH_DEFAULT, generate_pb_report_async
 
 # Windows 콘솔 기본 인코딩(cp949)에서 한글 로그가 깨지는 것을 방지
 for _stream in (sys.stdout, sys.stderr):
@@ -117,16 +118,23 @@ _generation_status: dict[str, Any] = {
 }
 
 
-def run_report_pipeline(target_date: Optional[str] = None, provider: Optional[str] = None) -> dict:
-    """collector + pb_engine 파이프라인을 1회 실행한다. 스케줄러/엔드포인트 공용 진입점."""
+async def run_report_pipeline(target_date: Optional[str] = None, provider: Optional[str] = None) -> dict:
+    """collector + pb_engine 파이프라인을 1회 실행한다. 스케줄러/엔드포인트 공용 진입점.
+
+    pb_engine의 리포트 생성 단계는 시장총평/자산배분, 국내종목, 미국종목, 뉴스 4개 태스크를
+    asyncio.gather로 동시에 호출하므로(각 태스크 자체 타임아웃 LLM_TIMEOUT_SECONDS + 재시도),
+    이 함수 전체를 async로 유지해 이벤트 루프 위에서 곧바로 await한다. try/finally로 예외가
+    나더라도 _generation_lock이 항상 안전하게 해제되도록 한다.
+    """
     if not _acquire_generation_lock():
         raise GenerationInProgressError("이미 리포트 생성이 진행 중입니다. 잠시 후 다시 시도하세요.")
 
     _generation_status.update(running=True, last_started_at=_now_iso(), last_error=None)
     try:
         logger.info("리포트 생성 시작 (target_date=%s, provider=%s)", target_date, provider)
-        market_data = collect_market_data(target_date)
-        report = generate_pb_report(target_date=target_date, provider=provider, market_data=market_data)
+        # collect_market_data는 동기/블로킹 함수이므로 스레드풀로 위임해 이벤트 루프를 막지 않는다.
+        market_data = await run_in_threadpool(collect_market_data, target_date)
+        report = await generate_pb_report_async(target_date=target_date, provider=provider, market_data=market_data)
         _generation_status.update(last_success=_now_iso(), last_error=None)
         logger.info("리포트 생성 완료: %s", report.get("meta"))
         return report
@@ -146,9 +154,13 @@ def _now_iso() -> str:
 
 
 def _scheduled_job() -> None:
-    """매일 08:00에 실행되는 자동 갱신 작업. 실패해도 스케줄러 자체는 죽지 않는다."""
+    """매일 08:00에 실행되는 자동 갱신 작업. 실패해도 스케줄러 자체는 죽지 않는다.
+
+    APScheduler의 BackgroundScheduler는 별도 OS 스레드(이벤트 루프 없음)에서 잡을 실행하므로,
+    async 파이프라인은 asyncio.run()으로 새 이벤트 루프를 만들어 실행한다.
+    """
     try:
-        run_report_pipeline()
+        asyncio.run(run_report_pipeline())
     except Exception:
         logger.exception("스케줄된 리포트 자동 갱신 실패")
 
@@ -221,7 +233,7 @@ async def generate_now(payload: Optional[GenerateNowRequest] = None) -> dict:
     provider = payload.provider if payload else None
 
     try:
-        report = await run_in_threadpool(run_report_pipeline, target_date, provider)
+        report = await run_report_pipeline(target_date, provider)
     except GenerationInProgressError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:

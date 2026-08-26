@@ -15,11 +15,12 @@ Gemini)에 전달하고, 엄격한 JSON 스키마로 응답을 받아 pb_report_
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime as dt
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -41,49 +42,27 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 # ---------------------------------------------------------------------------
-# 리포트 JSON 스키마 (프롬프트에 그대로 포함해 모델이 형식을 따르게 한다)
+# 리포트 JSON 스키마 - 4개 독립 태스크로 분할한다(asyncio.gather로 동시 호출).
+#   A) 시장 총평 + 자산배분 전략   B) 국내 추천 종목   C) 미국 추천 종목   D) 뉴스 파급력 분석
+# 각 태스크는 서로 다른 LLM 응답으로, 병렬 호출 후 하나의 리포트로 병합된다.
+# DART 공시는 collector가 제공하는 제목/날짜 메타데이터뿐이라(본문 전문이 없음) AI가
+# "분석"하면 근거 없는 해석을 지어낼 위험이 있어, 의도적으로 AI 태스크에 포함하지 않고
+# 프론트엔드에 원본 사실 그대로("더보기" 목록) 노출한다.
 # ---------------------------------------------------------------------------
 
-REPORT_JSON_TEMPLATE = {
+DISCLAIMER_TEXT = "본 리포트는 참고용 정보이며, 투자 판단과 그 결과에 대한 책임은 투자자 본인에게 있습니다."
+
+VALID_STRATEGY_OPINIONS = {"매수", "관망", "비중축소"}
+VALID_SUPPLY_DEMAND_STATUS = {"매집", "이탈", "혼조", "데이터없음"}
+
+TASK_A_SCHEMA = {
     "market_overview": {
         "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석. 결론(헤드라인)을 먼저 던지고 근거 수치로 뒷받침하는 브리핑 톤으로 작성",
         "pb_strategy_opinion": "매수 | 관망 | 비중축소 중 하나",
         "strategy_rationale": "위 전략 의견을 제시한 근거 2~3문장",
         "supply_demand_status": "매집 | 이탈 | 혼조 | 데이터없음 중 하나 (기관/외국인 수급 데이터가 없으면 데이터없음)",
-        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인 순매수)을 대조해 (1)기관과 외국인의 매매 방향이 같은지/엇갈리는지, (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로, (3)그 매집/이탈 구간을 기술적 지지·저항선과 겹쳐 본 장중 대응 전략까지 제시할 것. institution_net_buy/foreign_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석 및 technical의 pivot_point 기반 단기 지지/저항선으로 대체할 것",
+        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인 순매수)을 대조해 (1)기관과 외국인의 매매 방향이 같은지/엇갈리는지, (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로 제시할 것. institution_net_buy/foreign_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석으로 대체할 것",
         "intraday_playbook": "장중 실시간 대응 시나리오 2~3문장. '상승 돌파 시(구체적 가격 이상)' 대응과 '지지선 이탈 시(구체적 가격 이하)' 손절/비중조절 기준을 각각 실제 수치로 명시할 것",
-    },
-    "news_impact_analysis": [
-        {
-            "headline": "실제 수집된 뉴스 제목 중 하나를 그대로 인용",
-            "summary": "해당 뉴스의 핵심 내용 1~2문장 요약",
-            "impact": "이 뉴스가 시장/섹터에 미치는 파급 효과 분석 2~3문장",
-            "affected_sectors": ["영향받는 섹터/업종 목록"],
-        }
-    ],
-    "recommended_stocks": {
-        "domestic": [
-            {
-                "name": "종목명",
-                "ticker": "종목코드(예: 005930)",
-                "reason": "추천 이유",
-                "buy_point": "매수 관전 포인트(가격대, 이벤트, 기술적 신호 등)",
-                "breakout_price": "상승 돌파 시 추가 매수/대응 기준가(숫자, technical의 resistance_1 등 활용). 판단 불가 시 null",
-                "stop_loss_price": "지지선 이탈 시 손절/비중조절 기준가(숫자, technical의 support_1 등 활용). 판단 불가 시 null",
-                "risk": "투자 리스크",
-            }
-        ],
-        "us": [
-            {
-                "name": "종목명",
-                "ticker": "티커(예: AAPL)",
-                "reason": "추천 이유",
-                "buy_point": "매수 관전 포인트",
-                "breakout_price": "상승 돌파 시 대응 기준가(숫자). 판단 불가 시 null",
-                "stop_loss_price": "지지선 이탈 시 손절 기준가(숫자). 판단 불가 시 null",
-                "risk": "투자 리스크",
-            }
-        ],
     },
     "financial_products": [
         {
@@ -107,20 +86,33 @@ REPORT_JSON_TEMPLATE = {
         ],
         "rebalancing_strategy": "현재 시장 상황에 맞춘 리밸런싱 전략 2~3문장 (예: 비중 확대/축소할 자산군과 그 이유, 리밸런싱 주기 제안)",
     },
-    "disclaimer": "투자 판단의 최종 책임은 투자자 본인에게 있다는 취지의 안내 문구",
 }
 
-REQUIRED_TOP_LEVEL_KEYS = (
-    "market_overview",
-    "news_impact_analysis",
-    "recommended_stocks",
-    "financial_products",
-    "portfolio_allocation",
-    "disclaimer",
-)
 
-VALID_STRATEGY_OPINIONS = {"매수", "관망", "비중축소"}
-VALID_SUPPLY_DEMAND_STATUS = {"매집", "이탈", "혼조", "데이터없음"}
+def _stock_item_schema(ticker_example: str) -> dict:
+    return {
+        "name": "종목명",
+        "ticker": f"종목코드/티커(예: {ticker_example})",
+        "reason": "추천 이유",
+        "buy_point": "매수 관전 포인트(최소 3~4문장의 상세 PB 대응 노트)",
+        "breakout_price": "상승 돌파 시 대응 기준가(숫자). 판단 불가 시 null",
+        "stop_loss_price": "지지선 이탈 시 손절 기준가(숫자). 판단 불가 시 null",
+        "risk": "투자 리스크",
+    }
+
+
+TASK_B_SCHEMA = {"domestic": [_stock_item_schema("005930")]}
+TASK_C_SCHEMA = {"us": [_stock_item_schema("AAPL")]}
+TASK_D_SCHEMA = {
+    "news_impact_analysis": [
+        {
+            "headline": "실제 수집된 뉴스 제목 중 하나를 그대로 인용",
+            "summary": "해당 뉴스의 핵심 내용 1~2문장 요약",
+            "impact": "이 뉴스가 시장/섹터에 미치는 파급 효과 분석 2~3문장",
+            "affected_sectors": ["영향받는 섹터/업종 목록"],
+        }
+    ]
+}
 
 
 # ---------------------------------------------------------------------------
@@ -297,10 +289,11 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_user_prompt(context: dict) -> str:
-    schema_str = json.dumps(REPORT_JSON_TEMPLATE, ensure_ascii=False, indent=2)
+def _build_task_a_prompt(context: dict) -> str:
+    """Task A: 시장 총평(수급/장중 대응) + 금융상품 추천 + 자산배분 전략."""
+    schema_str = json.dumps(TASK_A_SCHEMA, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
-    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 시장 데이터입니다.
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 지수/수급/거시경제 데이터입니다.
 이 시각 이후 시세가 더 움직였을 수 있다는 점을 염두에 두고, "지금 이 시각 기준"임을 리포트 안에서 자연스럽게 드러낼 것.
 
 [시장 데이터]
@@ -311,13 +304,30 @@ def build_user_prompt(context: dict) -> str:
    - indices의 국내 지수(KOSPI/KOSDAQ)에 institution_net_buy/foreign_net_buy 수치가 있으면, recent_days(날짜별 종가 + 기관/외국인 순매수 시계열)를 직접 대조해 다음을 포함한 심층 수급 분석을 작성할 것(supply_demand_analysis):
      a) 기관과 외국인의 매매 방향이 최근 며칠간 같은 방향인지, 엇갈리는지(예: 외국인 매수·기관 매도의 수급 공방).
      b) recent_days에서 순매수(양수)가 몰린 날짜들의 종가 범위를 "매집 구간"으로, 순매도(음수)가 몰린 날짜들의 종가 범위를 "이탈 구간"으로 짚어낼 것 - 실제 수치에 근거해야 하며 데이터에 없는 가격대를 지어내지 말 것.
-     c) 위에서 짚은 매집/이탈 구간을 technical.domestic 종목들의 pivot_point(지지/저항선)와 겹쳐 보고, 장중 대응 지지선·저항선 및 대응전략(매수/관망/비중축소 중 어느 시점에 어떤 대응)을 구체적으로 제시할 것.
+     c) 위에서 짚은 매집/이탈 구간을 근거로 장중 대응 지지선·저항선 및 대응전략(매수/관망/비중축소 중 어느 시점에 어떤 대응)을 구체적으로 제시할 것.
      이 내용을 바탕으로 supply_demand_status를 매집/이탈/혼조 중 하나로 판정할 것.
      supply_demand_date가 target_date보다 이전이면 "직전 영업일 기준" 데이터임을 밝힐 것.
-   - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
-   - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수 또는 대표 종목의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
-2. news 항목(코스피/코스닥/미국 증시/금리/반도체/환율 등 다양한 쿼리에서 수집됨) 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 정확히 {NEWS_IMPACT_COUNT}개 선정해 각각의 시장 파급 효과(Impact Analysis)를 해석할 것. 특정 쿼리에 편중되지 말고 국내/해외/거시/섹터 뉴스가 고르게 섞이도록 할 것. news에 없는 헤드라인을 지어내지 말 것.
-3. technical.domestic에 있는 국내 종목 {DOMESTIC_RECOMMENDATION_COUNT}개 전부, technical.us에 있는 미국 종목 {US_RECOMMENDATION_COUNT}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목마다 다음 4가지 객관적 지표를 전부 종합해 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것:
+   - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것.
+   - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
+2. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것(financial_products).
+3. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
+4. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것.
+
+[출력 JSON 스키마]
+{schema_str}
+"""
+
+
+def _build_stock_task_prompt(context: dict, market_key: str, schema: dict, count: int, ticker_example: str) -> str:
+    schema_str = json.dumps(schema, ensure_ascii=False, indent=2)
+    context_str = json.dumps(context, ensure_ascii=False, indent=2)
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 종목별 기술적 지표 데이터입니다.
+
+[기술적 지표 데이터]
+{context_str}
+
+[작성 요구사항]
+1. technical.{market_key}에 있는 종목 {count}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목마다 다음 4가지 객관적 지표를 전부 종합해 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것:
    a) moving_averages/trend: 이동평균 정배열(상승 추세)/역배열(하락 추세)/혼조 여부.
    b) pivot_point: 차트에는 피봇(P)·1차저항(R1)·1차지지(S1) 핵심 3선만 표시되므로, 이 3개 가격대를 중심으로 서술할 것(R2/S2는 근거가 필요할 때만 보조적으로 언급).
    c) trend_channel: 고점-고점을 이은 저항 추세선(resistance_trendline), 저점-저점을 이은 지지 추세선(support_trendline)의 최근 값과 방향(상승/하락/횡보). null이면 추세선을 판단할 스윙 포인트가 부족하다는 뜻이니 언급하지 말 것.
@@ -329,10 +339,36 @@ def build_user_prompt(context: dict) -> str:
      (3) 지지 추세선·피봇 지지선(P/S1) 이탈 시 손절/비중조절 기준을 실제 가격과 함께 제시할 것.
      감정적 수식어("기대된다", "유망하다") 없이 수치와 인과관계로만 서술할 것.
    - breakout_price에는 technical의 resistance_1(또는 prev_high, 저항 추세선 근접값) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low, 지지 추세선 근접값) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
-   - ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
-4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
-5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
-6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic은 정확히 {DOMESTIC_RECOMMENDATION_COUNT}개, recommended_stocks.us는 정확히 {US_RECOMMENDATION_COUNT}개의 원소를 가질 것.
+   - ticker 필드는 반드시 technical.{market_key}의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "{ticker_example}").
+2. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. 정확히 {count}개의 원소를 가질 것.
+
+[출력 JSON 스키마]
+{schema_str}
+"""
+
+
+def _build_task_b_prompt(context: dict) -> str:
+    """Task B: 국내 종목 PB 전략 노트."""
+    return _build_stock_task_prompt(context, "domestic", TASK_B_SCHEMA, DOMESTIC_RECOMMENDATION_COUNT, "005930")
+
+
+def _build_task_c_prompt(context: dict) -> str:
+    """Task C: 미국 종목 PB 전략 노트."""
+    return _build_stock_task_prompt(context, "us", TASK_C_SCHEMA, US_RECOMMENDATION_COUNT, "AAPL")
+
+
+def _build_task_d_prompt(context: dict) -> str:
+    """Task D: 뉴스 파급력 분석."""
+    schema_str = json.dumps(TASK_D_SCHEMA, ensure_ascii=False, indent=2)
+    context_str = json.dumps(context, ensure_ascii=False, indent=2)
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 뉴스 데이터입니다.
+
+[뉴스 데이터]
+{context_str}
+
+[작성 요구사항]
+1. news 항목(코스피/코스닥/미국 증시/금리/반도체/환율 등 다양한 쿼리에서 수집됨) 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 정확히 {NEWS_IMPACT_COUNT}개 선정해 각각의 시장 파급 효과(Impact Analysis)를 해석할 것. 특정 쿼리에 편중되지 말고 국내/해외/거시/섹터 뉴스가 고르게 섞이도록 할 것. news에 없는 헤드라인을 지어내지 말 것.
+2. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. news_impact_analysis는 정확히 {NEWS_IMPACT_COUNT}개의 원소를 가질 것.
 
 [출력 JSON 스키마]
 {schema_str}
@@ -415,6 +451,57 @@ def call_llm(system_prompt: str, user_prompt: str, provider: Optional[str] = Non
     raise ValueError(f"지원하지 않는 AI_PROVIDER 입니다: {resolved} (openai | gemini)")
 
 
+async def _call_openai_async(system_prompt: str, user_prompt: str) -> str:
+    from openai import AsyncOpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
+
+    client = AsyncOpenAI(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS)
+    model = os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.4,
+    )
+    return response.choices[0].message.content
+
+
+async def _call_gemini_async(system_prompt: str, user_prompt: str) -> str:
+    import google.generativeai as genai
+
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY(GOOGLE_API_KEY) 환경 변수가 설정되지 않았습니다.")
+
+    genai.configure(api_key=api_key)
+    model_name = os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+    model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+    response = await model.generate_content_async(
+        user_prompt,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.4,
+        ),
+        request_options={"timeout": LLM_TIMEOUT_SECONDS},
+    )
+    return response.text
+
+
+async def call_llm_async(system_prompt: str, user_prompt: str, provider: Optional[str] = None) -> str:
+    resolved = _resolve_provider(provider)
+    if resolved == "openai":
+        return await _call_openai_async(system_prompt, user_prompt)
+    if resolved == "gemini":
+        return await _call_gemini_async(system_prompt, user_prompt)
+    raise ValueError(f"지원하지 않는 AI_PROVIDER 입니다: {resolved} (openai | gemini)")
+
+
 # ---------------------------------------------------------------------------
 # 4. 응답 파싱 및 스키마 검증
 # ---------------------------------------------------------------------------
@@ -437,12 +524,10 @@ def _extract_json(raw_text: str) -> dict:
     raise ValueError("모델 응답에서 유효한 JSON을 추출하지 못했습니다.")
 
 
-def validate_report_schema(report: dict) -> None:
-    missing = [k for k in REQUIRED_TOP_LEVEL_KEYS if k not in report]
-    if missing:
-        raise ValueError(f"리포트에 필수 키가 없습니다: {missing}")
-
-    overview = report.get("market_overview", {})
+def _validate_task_a(data: dict) -> None:
+    overview = data.get("market_overview")
+    if not isinstance(overview, dict):
+        raise ValueError("market_overview가 없습니다.")
     opinion = overview.get("pb_strategy_opinion")
     if opinion not in VALID_STRATEGY_OPINIONS:
         raise ValueError(f"pb_strategy_opinion 값이 올바르지 않습니다: {opinion!r}")
@@ -454,24 +539,10 @@ def validate_report_schema(report: dict) -> None:
     if not overview.get("intraday_playbook"):
         raise ValueError("market_overview.intraday_playbook이 비어있습니다.")
 
-    stocks = report.get("recommended_stocks", {})
-    expected_counts = {"domestic": DOMESTIC_RECOMMENDATION_COUNT, "us": US_RECOMMENDATION_COUNT}
-    for key, expected_count in expected_counts.items():
-        items = stocks.get(key)
-        if not isinstance(items, list) or len(items) != expected_count:
-            raise ValueError(f"recommended_stocks.{key}는 정확히 {expected_count}개의 종목이어야 합니다.")
-        for item in items:
-            required_fields = {"name", "ticker", "reason", "buy_point", "risk", "breakout_price", "stop_loss_price"}
-            if not required_fields.issubset(item):
-                raise ValueError(f"recommended_stocks.{key} 항목에 누락된 필드가 있습니다: {item}")
-
-    news_items = report.get("news_impact_analysis")
-    if not isinstance(news_items, list) or len(news_items) != NEWS_IMPACT_COUNT:
-        raise ValueError(f"news_impact_analysis는 정확히 {NEWS_IMPACT_COUNT}개여야 합니다.")
-    if not isinstance(report.get("financial_products"), list):
+    if not isinstance(data.get("financial_products"), list):
         raise ValueError("financial_products는 리스트여야 합니다.")
 
-    allocation = report.get("portfolio_allocation", {})
+    allocation = data.get("portfolio_allocation", {})
     assets = allocation.get("assets")
     if not isinstance(assets, list) or not assets:
         raise ValueError("portfolio_allocation.assets는 비어있지 않은 리스트여야 합니다.")
@@ -488,6 +559,29 @@ def validate_report_schema(report: dict) -> None:
         raise ValueError("portfolio_allocation.rebalancing_strategy가 비어있습니다.")
 
 
+def _validate_stock_items(items: Any, expected_count: int, label: str) -> None:
+    if not isinstance(items, list) or len(items) != expected_count:
+        raise ValueError(f"{label}는 정확히 {expected_count}개의 종목이어야 합니다.")
+    required_fields = {"name", "ticker", "reason", "buy_point", "risk", "breakout_price", "stop_loss_price"}
+    for item in items:
+        if not required_fields.issubset(item):
+            raise ValueError(f"{label} 항목에 누락된 필드가 있습니다: {item}")
+
+
+def _validate_task_b(data: dict) -> None:
+    _validate_stock_items(data.get("domestic"), DOMESTIC_RECOMMENDATION_COUNT, "recommended_stocks.domestic")
+
+
+def _validate_task_c(data: dict) -> None:
+    _validate_stock_items(data.get("us"), US_RECOMMENDATION_COUNT, "recommended_stocks.us")
+
+
+def _validate_task_d(data: dict) -> None:
+    news_items = data.get("news_impact_analysis")
+    if not isinstance(news_items, list) or len(news_items) != NEWS_IMPACT_COUNT:
+        raise ValueError(f"news_impact_analysis는 정확히 {NEWS_IMPACT_COUNT}개여야 합니다.")
+
+
 # ---------------------------------------------------------------------------
 # 5. 저장
 # ---------------------------------------------------------------------------
@@ -499,16 +593,48 @@ def save_report(report: dict, output_path: str = OUTPUT_PATH_DEFAULT) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 6. 종합 엔트리포인트
+# 6. 종합 엔트리포인트 - Task A/B/C/D를 asyncio.gather로 동시 호출
 # ---------------------------------------------------------------------------
 
-def generate_pb_report(
+# (task_name, 프롬프트 빌더, 검증기) - asyncio.gather 순서와 결과 언패킹 순서를 일치시킨다.
+_TASK_SPECS: list[tuple[str, Callable[[dict], str], Callable[[dict], None]]] = [
+    ("A", _build_task_a_prompt, _validate_task_a),
+    ("B", _build_task_b_prompt, _validate_task_b),
+    ("C", _build_task_c_prompt, _validate_task_c),
+    ("D", _build_task_d_prompt, _validate_task_d),
+]
+
+
+async def _generate_task(
+    task_name: str,
+    context: dict,
+    build_prompt: Callable[[dict], str],
+    validator: Callable[[dict], None],
+    provider: Optional[str],
+) -> dict:
+    """단일 태스크를 호출->파싱->검증하고, 실패 시 MAX_GENERATION_ATTEMPTS까지 재시도한다."""
+    user_prompt = build_prompt(context)
+    last_error: Optional[Exception] = None
+    for _ in range(1, MAX_GENERATION_ATTEMPTS + 1):
+        try:
+            raw_text = await call_llm_async(SYSTEM_PROMPT, user_prompt, provider=provider)
+            parsed = _extract_json(raw_text)
+            validator(parsed)
+            return parsed
+        except Exception as exc:  # noqa: BLE001 - 재시도 후 최종 실패 시 위로 전파
+            last_error = exc
+            continue
+    raise RuntimeError(f"Task {task_name} 생성에 {MAX_GENERATION_ATTEMPTS}회 실패했습니다: {last_error}") from last_error
+
+
+async def generate_pb_report_async(
     target_date: DateLike = None,
     provider: Optional[str] = None,
     output_path: str = OUTPUT_PATH_DEFAULT,
     market_data: Optional[dict] = None,
 ) -> dict:
-    """시장 데이터를 수집(또는 재사용)하고 AI로 Senior PB 리포트를 생성해 파일로 저장한다.
+    """시장 데이터를 수집(또는 재사용)하고, 4개 독립 태스크(시장총평·자산배분 / 국내종목 /
+    미국종목 / 뉴스)를 asyncio.gather로 동시 호출해 Senior PB 리포트를 생성, 저장한다.
 
     Args:
         target_date: 리포트 기준일. None이면 오늘.
@@ -520,28 +646,50 @@ def generate_pb_report(
         저장된 리포트 dict (meta, source_errors 포함).
     """
     resolved_date = _to_date(target_date)
-    market_data = market_data or collect_market_data(resolved_date)
-    context = build_prompt_context(market_data)
+    # collect_market_data는 동기/블로킹 함수이므로 이벤트 루프를 막지 않도록 스레드로 위임한다.
+    market_data = market_data or await asyncio.to_thread(collect_market_data, resolved_date)
+    full_context = build_prompt_context(market_data)
 
-    system_prompt = SYSTEM_PROMPT
-    user_prompt = build_user_prompt(context)
+    task_contexts = {
+        "A": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "indices", "macro")},
+        "B": {
+            "target_date": full_context["target_date"],
+            "analysis_timestamp": full_context["analysis_timestamp"],
+            "technical": {"domestic": full_context["technical"]["domestic"]},
+        },
+        "C": {
+            "target_date": full_context["target_date"],
+            "analysis_timestamp": full_context["analysis_timestamp"],
+            "technical": {"us": full_context["technical"]["us"]},
+        },
+        "D": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "news")},
+    }
 
-    last_error: Optional[Exception] = None
-    report_body: Optional[dict] = None
+    results = await asyncio.gather(
+        *(
+            _generate_task(name, task_contexts[name], build_prompt, validator, provider)
+            for name, build_prompt, validator in _TASK_SPECS
+        ),
+        return_exceptions=True,
+    )
 
-    for attempt in range(1, MAX_GENERATION_ATTEMPTS + 1):
-        try:
-            raw_text = call_llm(system_prompt, user_prompt, provider=provider)
-            parsed = _extract_json(raw_text)
-            validate_report_schema(parsed)
-            report_body = parsed
-            break
-        except Exception as exc:  # noqa: BLE001 - 재시도 후 최종 실패 시 위로 전파
-            last_error = exc
-            continue
+    errors = [r for r in results if isinstance(r, Exception)]
+    if errors:
+        raise RuntimeError(f"PB 리포트 생성 중 {len(errors)}개 태스크가 실패했습니다: {errors[0]}") from errors[0]
 
-    if report_body is None:
-        raise RuntimeError(f"PB 리포트 생성에 {MAX_GENERATION_ATTEMPTS}회 실패했습니다: {last_error}")
+    task_a, task_b, task_c, task_d = results
+
+    report_body = {
+        "market_overview": task_a["market_overview"],
+        "news_impact_analysis": task_d["news_impact_analysis"],
+        "recommended_stocks": {
+            "domestic": task_b["domestic"],
+            "us": task_c["us"],
+        },
+        "financial_products": task_a["financial_products"],
+        "portfolio_allocation": task_a["portfolio_allocation"],
+        "disclaimer": DISCLAIMER_TEXT,
+    }
 
     # 프론트엔드가 캔들차트 등을 그릴 수 있도록 원본 시장 데이터(전체 OHLCV/이평선/지수/거시지표 등)를 함께 저장.
     raw_market_data = {k: v for k, v in market_data.items() if k not in ("meta", "errors")}
@@ -559,6 +707,23 @@ def generate_pb_report(
 
     save_report(report, output_path)
     return report
+
+
+def generate_pb_report(
+    target_date: DateLike = None,
+    provider: Optional[str] = None,
+    output_path: str = OUTPUT_PATH_DEFAULT,
+    market_data: Optional[dict] = None,
+) -> dict:
+    """generate_pb_report_async()의 동기 래퍼(CLI 등 기존 동기 호출부 호환용)."""
+    return asyncio.run(
+        generate_pb_report_async(
+            target_date=target_date,
+            provider=provider,
+            output_path=output_path,
+            market_data=market_data,
+        )
+    )
 
 
 def _parse_args() -> argparse.Namespace:
