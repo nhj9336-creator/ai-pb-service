@@ -9,6 +9,8 @@ import {
   HistogramSeries,
   LineStyle,
   type IChartApi,
+  type IPriceLine,
+  type ISeriesApi,
   type Time,
 } from "lightweight-charts";
 import type { SelectedStock, TechnicalStock, TrendLine } from "@/types/report";
@@ -19,22 +21,40 @@ interface StockChartProps {
   stock: TechnicalStock | null | undefined;
 }
 
+// MA는 참고용 보조선이므로 핵심 지지/저항/추세선 대비 옅은 톤(알파 채널 축소)으로 표시해
+// 산만함을 줄인다.
 const MA_LINES: { key: "ma5" | "ma20" | "ma60" | "ma120"; label: string; color: string }[] = [
-  { key: "ma5", label: "MA5", color: "#facc15" },
-  { key: "ma20", label: "MA20", color: "#38bdf8" },
-  { key: "ma60", label: "MA60", color: "#a78bfa" },
-  { key: "ma120", label: "MA120", color: "#94a3b8" },
+  { key: "ma5", label: "MA5", color: "#facc15b3" },
+  { key: "ma20", label: "MA20", color: "#38bdf8b3" },
+  { key: "ma60", label: "MA60", color: "#a78bfab3" },
+  { key: "ma120", label: "MA120", color: "#94a3b8b3" },
 ];
 
 type RangeMode = "1y" | "2y" | "all";
 const RANGE_BARS: Record<RangeMode, number | null> = { "1y": 252, "2y": 504, all: null };
 const RANGE_LABELS: Record<RangeMode, string> = { "1y": "1년", "2y": "2년", all: "전체" };
 
+// "전체" 모드의 초기 진입 시 확대해서 보여줄 최근 구간(개월). 과거 전체 히스토리는 여전히
+// 로드되어 있어 좌측으로 스크롤/드래그하면 이전 구간도 바로 이어서 확인할 수 있다.
+const DEFAULT_ZOOM_MONTHS = 4;
+
 const MAIN_PANE_HEIGHT = 320;
 const VOLUME_PANE_HEIGHT = 110;
 
 function sliceArr<T>(arr: T[], n: number | null): T[] {
   return n === null ? arr : arr.slice(-n);
+}
+
+/** "전체" 모드 진입 시 기본으로 보여줄 시야 범위: 최근 DEFAULT_ZOOM_MONTHS개월~현재.
+ * 그보다 이전 데이터는 로드는 되어 있지만(좌측 스크롤로 확인 가능) 초기 확대 범위에서는 제외한다. */
+function computeDefaultVisibleRange(dates: string[]): { from: Time; to: Time } | null {
+  if (dates.length === 0) return null;
+  const lastDateStr = dates[dates.length - 1];
+  const cutoff = new Date(lastDateStr);
+  cutoff.setMonth(cutoff.getMonth() - DEFAULT_ZOOM_MONTHS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const fromDateStr = dates.find((d) => d >= cutoffStr) ?? dates[0];
+  return { from: fromDateStr as Time, to: lastDateStr as Time };
 }
 
 function buildTechnicalNote(stock: TechnicalStock): string {
@@ -160,6 +180,9 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
 export default function StockChart({ selection, stock }: StockChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const trendSeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   // 2024-01부터의 전체 히스토리를 기본으로 보여준다("최근 1년만 보인다"는 혼선을 방지).
   const [rangeMode, setRangeMode] = useState<RangeMode>("all");
   const [showMethodology, setShowMethodology] = useState(false);
@@ -185,6 +208,9 @@ export default function StockChart({ selection, stock }: StockChartProps) {
     };
   }, [stock, rangeMode]);
 
+  // 1) 차트 뼈대(캔들/이평선/거래량) 생성 - 종목·구간이 바뀔 때만 새로 만든다.
+  // 지지/저항선·추세선 토글은 별도 effect에서 처리해 여기서는 손대지 않으므로, 토글 시
+  // 차트가 재생성되지 않고 사용자가 보고 있던 시야 범위(Zoom/Pan)가 그대로 유지된다.
   useEffect(() => {
     if (!containerRef.current || !stock || !sliced) return;
 
@@ -199,7 +225,11 @@ export default function StockChart({ selection, stock }: StockChartProps) {
         horzLines: { color: "#1c2436" },
       },
       rightPriceScale: { borderColor: "#232c40" },
-      timeScale: { borderColor: "#232c40" },
+      timeScale: {
+        borderColor: "#232c40",
+        // 최신 봉 오른쪽으로 빈 공간이 무한히 스크롤되지 않도록 오른쪽 경계를 데이터 끝에 고정한다.
+        fixRightEdge: true,
+      },
       width: containerRef.current.clientWidth,
       height: MAIN_PANE_HEIGHT + VOLUME_PANE_HEIGHT,
     });
@@ -211,7 +241,11 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       borderVisible: false,
       wickUpColor: "#fb7185",
       wickDownColor: "#60a5fa",
+      // 마지막 종가에서 가로로 가로지르는 점선(기본값)을 끄고, 지지/저항선이 더 선명하게
+      // 보이도록 한다. 현재가는 상단 헤더에 이미 텍스트로 표시된다.
+      priceLineVisible: false,
     });
+    candleSeriesRef.current = candleSeries;
 
     const candleData = sliced.dates
       .map((date, i) => ({
@@ -235,57 +269,15 @@ export default function StockChart({ selection, stock }: StockChartProps) {
         color: ma.color,
         lineWidth: 1,
         title: ma.label,
+        // MA는 보조 지표이므로 지지/저항선과 겹쳐 산만해지지 않도록 자체 기준선(점선)과
+        // 우측 축의 마지막 값 라벨을 끈다(상단 범례로 색상은 이미 구분 가능).
+        priceLineVisible: false,
+        lastValueVisible: false,
       });
       const lineData = sliced.dates
         .map((date, i) => ({ time: date as Time, value: sliced[ma.key][i] }))
         .filter((d) => d.value !== null) as { time: Time; value: number }[];
       series.setData(lineData);
-    }
-
-    // 핵심 지지/저항선만 표시(피봇 P, 1차 저항 R1, 1차 지지 S1) - 나머지(R2/S2)는 산만함을
-    // 줄이기 위해 차트에서 제외한다(수치 자체는 PB 대응 노트/breakout·stop_loss에서 계속 활용).
-    const { pivot_point, trend_channel } = stock;
-    if (showLevels) {
-      const priceLineSpecs: { price: number | null; title: string; color: string }[] = [
-        { price: pivot_point.resistance_1, title: "저항선 R1", color: "#f97316" },
-        { price: pivot_point.pivot, title: "피봇 P", color: "#94a3b8" },
-        { price: pivot_point.support_1, title: "지지선 S1", color: "#34d399" },
-      ];
-      for (const spec of priceLineSpecs) {
-        if (spec.price === null) continue;
-        candleSeries.createPriceLine({
-          price: spec.price,
-          color: spec.color,
-          lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: spec.title,
-        });
-      }
-    }
-
-    // 대각선 추세선(고점-고점/저점-저점) 오버레이
-    if (showTrendlines) {
-      const trendLineSpecs: { line: TrendLine | null; color: string; title: string }[] = [
-        { line: trend_channel?.resistance_trendline ?? null, color: "#fb923c", title: "저항 추세선" },
-        { line: trend_channel?.support_trendline ?? null, color: "#4ade80", title: "지지 추세선" },
-      ];
-      for (const spec of trendLineSpecs) {
-        const line = spec.line;
-        if (!line || line.start_value === null || line.end_value === null) continue;
-        const series = chart.addSeries(LineSeries, {
-          color: spec.color,
-          lineWidth: 2,
-          lineStyle: LineStyle.Dashed,
-          title: spec.title,
-          lastValueVisible: false,
-          priceLineVisible: false,
-        });
-        series.setData([
-          { time: line.start_date as Time, value: line.start_value },
-          { time: line.end_date as Time, value: line.end_value },
-        ]);
-      }
     }
 
     // 거래량 서브차트 (별도 pane)
@@ -311,7 +303,16 @@ export default function StockChart({ selection, stock }: StockChartProps) {
     if (panes[0]) panes[0].setHeight(MAIN_PANE_HEIGHT);
     if (panes[1]) panes[1].setHeight(VOLUME_PANE_HEIGHT);
 
-    chart.timeScale().fitContent();
+    // "전체" 모드는 2024-01부터의 전체 히스토리를 로드하되, 초기 확대 범위는 최근
+    // DEFAULT_ZOOM_MONTHS개월로 좁혀 불필요하게 먼 과거까지 보이지 않게 한다(좌측 스크롤로
+    // 언제든 과거 구간을 이어서 볼 수 있다). 1년/2년 탭은 이미 그만큼만 로드했으므로 기존대로
+    // 전체를 fitContent로 보여준다.
+    const defaultRange = rangeMode === "all" ? computeDefaultVisibleRange(sliced.dates) : null;
+    if (defaultRange) {
+      chart.timeScale().setVisibleRange(defaultRange);
+    } else {
+      chart.timeScale().fitContent();
+    }
 
     const handleResize = () => {
       if (containerRef.current) {
@@ -324,8 +325,91 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       window.removeEventListener("resize", handleResize);
       chart.remove();
       chartRef.current = null;
+      candleSeriesRef.current = null;
+      priceLinesRef.current = [];
+      trendSeriesRef.current = [];
     };
-  }, [stock, sliced, selection.market, showLevels, showTrendlines]);
+  }, [stock, sliced, selection.market, rangeMode]);
+
+  // 2) 지지/저항선(피봇 P/R1/S1) 토글 - 차트를 새로 만들지 않고 가격선만 추가/제거하므로
+  // 사용자가 보고 있던 Zoom/Pan 상태가 그대로 유지된다.
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries || !stock) return;
+
+    for (const line of priceLinesRef.current) {
+      candleSeries.removePriceLine(line);
+    }
+    priceLinesRef.current = [];
+
+    if (!showLevels) return;
+
+    // 핵심 지지/저항선만 표시(피봇 P, 1차 저항 R1, 1차 지지 S1) - 나머지(R2/S2)는 산만함을
+    // 줄이기 위해 차트에서 제외한다(수치 자체는 PB 대응 노트/breakout·stop_loss에서 계속 활용).
+    const { pivot_point } = stock;
+    const priceLineSpecs: { price: number | null; title: string; color: string }[] = [
+      { price: pivot_point.resistance_1, title: "저항선 R1", color: "#f97316" },
+      { price: pivot_point.pivot, title: "피봇 P", color: "#94a3b8" },
+      { price: pivot_point.support_1, title: "지지선 S1", color: "#34d399" },
+    ];
+    for (const spec of priceLineSpecs) {
+      if (spec.price === null) continue;
+      const line = candleSeries.createPriceLine({
+        price: spec.price,
+        color: spec.color,
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        // 이름표는 캔들 위가 아닌 오른쪽 가격 축 안쪽에만 표시되어 봉/주가를 가리지 않는다.
+        axisLabelVisible: true,
+        title: spec.title,
+      });
+      priceLinesRef.current.push(line);
+    }
+    // sliced/rangeMode/selection.market은 effect 1이 차트를 재생성하는 트리거와 동일하다 -
+    // 차트가 재생성되면(candleSeriesRef.current가 새 인스턴스로 바뀌면) 여기서도 함께
+    // 재실행되어 새 차트에 가격선을 다시 그려야 한다(그렇지 않으면 구간 탭 전환 시 선이
+    // 사라진다). showLevels만 바뀔 때는 이 값들이 그대로이므로 차트는 재생성되지 않는다.
+  }, [stock, sliced, selection.market, rangeMode, showLevels]);
+
+  // 3) 대각선 추세선(고점-고점/저점-저점) 토글 - 마찬가지로 차트를 새로 만들지 않는다.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !stock) return;
+
+    for (const series of trendSeriesRef.current) {
+      chart.removeSeries(series);
+    }
+    trendSeriesRef.current = [];
+
+    if (!showTrendlines) return;
+
+    const { trend_channel } = stock;
+    const trendLineSpecs: { line: TrendLine | null; color: string; title: string }[] = [
+      { line: trend_channel?.resistance_trendline ?? null, color: "#fb923c", title: "저항 추세선" },
+      { line: trend_channel?.support_trendline ?? null, color: "#4ade80", title: "지지 추세선" },
+    ];
+    for (const spec of trendLineSpecs) {
+      const line = spec.line;
+      if (!line || line.start_value === null || line.end_value === null) continue;
+      const series = chart.addSeries(LineSeries, {
+        color: spec.color,
+        lineWidth: 3,
+        lineStyle: LineStyle.Solid,
+        title: spec.title,
+        // 대각선이라 마지막 값 라벨의 축 위치가 실제 가격과 어긋나 오해를 줄 수 있어 끄고,
+        // 자체 기준선(점선)도 지지/저항선과 겹치지 않도록 끈다.
+        lastValueVisible: false,
+        priceLineVisible: false,
+      });
+      series.setData([
+        { time: line.start_date as Time, value: line.start_value },
+        { time: line.end_date as Time, value: line.end_value },
+      ]);
+      trendSeriesRef.current.push(series);
+    }
+    // sliced/rangeMode/selection.market을 포함하는 이유는 effect 2와 동일(차트 재생성 시
+    // 새 차트에 추세선을 다시 그리기 위함).
+  }, [stock, sliced, selection.market, rangeMode, showTrendlines]);
 
   if (!stock) {
     return (

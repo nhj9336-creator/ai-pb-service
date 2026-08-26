@@ -60,8 +60,8 @@ TASK_A_SCHEMA = {
         "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석. 결론(헤드라인)을 먼저 던지고 근거 수치로 뒷받침하는 브리핑 톤으로 작성",
         "pb_strategy_opinion": "매수 | 관망 | 비중축소 중 하나",
         "strategy_rationale": "위 전략 의견을 제시한 근거 2~3문장",
-        "supply_demand_status": "매집 | 이탈 | 혼조 | 데이터없음 중 하나 (기관/외국인 수급 데이터가 없으면 데이터없음)",
-        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인 순매수)을 대조해 (1)기관과 외국인의 매매 방향이 같은지/엇갈리는지, (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로 제시할 것. institution_net_buy/foreign_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석으로 대체할 것",
+        "supply_demand_status": "매집 | 이탈 | 혼조 | 데이터없음 중 하나 (기관/외국인/개인 수급 데이터가 없으면 데이터없음)",
+        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy/individual_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인/개인 순매수)을 대조해 (1)기관·외국인·개인 3주체의 매매 방향이 서로 같은지/엇갈리는지(예: 외국인·기관 매수 vs 개인 매도의 손바뀜 구도), (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로 제시할 것. institution_net_buy/foreign_net_buy/individual_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석으로 대체할 것",
         "intraday_playbook": "장중 실시간 대응 시나리오 2~3문장. '상승 돌파 시(구체적 가격 이상)' 대응과 '지지선 이탈 시(구체적 가격 이하)' 손절/비중조절 기준을 각각 실제 수치로 명시할 것",
     },
     "financial_products": [
@@ -139,10 +139,10 @@ def _condense_indices(indices: dict) -> dict:
         sd = snap.get("supply_demand")
         sd_history_by_date = {h["date"]: h for h in (sd.get("history") or [])} if sd else {}
 
-        # 최근 거래일의 종가와 기관/외국인 순매수를 날짜별로 대조한 시계열.
-        # institution_net_buy/foreign_net_buy가 전부 null이면 수급 데이터 자체가 없는 상태
-        # (KRX 로그인 미설정 등)이며, 이 경우 프롬프트에서 거래량·등락률 기반 모멘텀
-        # 분석으로 대체하도록 안내한다. 데이터가 있으면 종가 대비 순매수 흐름을 대조해
+        # 최근 거래일의 종가와 기관/외국인/개인 순매수를 날짜별로 대조한 시계열.
+        # institution_net_buy/foreign_net_buy/individual_net_buy가 전부 null이면 수급 데이터
+        # 자체가 없는 상태(KRX 로그인 미설정 등)이며, 이 경우 프롬프트에서 거래량·등락률 기반
+        # 모멘텀 분석으로 대체하도록 안내한다. 데이터가 있으면 종가 대비 순매수 흐름을 대조해
         # 수급 주체별 매집/이탈 구간을 판단하는 데 사용한다.
         recent_days = [
             {
@@ -150,6 +150,7 @@ def _condense_indices(indices: dict) -> dict:
                 "close": p.get("close"),
                 "institution_net_buy": sd_history_by_date.get(p["date"], {}).get("institution_net_buy"),
                 "foreign_net_buy": sd_history_by_date.get(p["date"], {}).get("foreign_net_buy"),
+                "individual_net_buy": sd_history_by_date.get(p["date"], {}).get("individual_net_buy"),
             }
             for p in (snap.get("price_history") or [])
         ]
@@ -162,6 +163,7 @@ def _condense_indices(indices: dict) -> dict:
             "supply_demand_date": sd.get("date") if sd else None,
             "institution_net_buy": sd.get("institution_net_buy") if sd else None,
             "foreign_net_buy": sd.get("foreign_net_buy") if sd else None,
+            "individual_net_buy": sd.get("individual_net_buy") if sd else None,
             "recent_days": recent_days,
         }
     return condensed
@@ -301,13 +303,13 @@ def _build_task_a_prompt(context: dict) -> str:
 
 [작성 요구사항]
 1. 국내/미국 지수, 수급, 거시지표를 종합해 시장 흐름을 분석하고, PB로서 매수/관망/비중축소 중 하나의 전략 의견을 제시할 것.
-   - indices의 국내 지수(KOSPI/KOSDAQ)에 institution_net_buy/foreign_net_buy 수치가 있으면, recent_days(날짜별 종가 + 기관/외국인 순매수 시계열)를 직접 대조해 다음을 포함한 심층 수급 분석을 작성할 것(supply_demand_analysis):
-     a) 기관과 외국인의 매매 방향이 최근 며칠간 같은 방향인지, 엇갈리는지(예: 외국인 매수·기관 매도의 수급 공방).
-     b) recent_days에서 순매수(양수)가 몰린 날짜들의 종가 범위를 "매집 구간"으로, 순매도(음수)가 몰린 날짜들의 종가 범위를 "이탈 구간"으로 짚어낼 것 - 실제 수치에 근거해야 하며 데이터에 없는 가격대를 지어내지 말 것.
+   - indices의 국내 지수(KOSPI/KOSDAQ)에 institution_net_buy/foreign_net_buy/individual_net_buy 수치가 있으면, recent_days(날짜별 종가 + 기관/외국인/개인 순매수 시계열)를 직접 대조해 다음을 포함한 심층 수급 분석을 작성할 것(supply_demand_analysis):
+     a) 기관·외국인·개인 3주체의 매매 방향이 최근 며칠간 서로 같은지, 엇갈리는지(예: 외국인·기관 동반 매수에 개인이 매도로 대응하는 손바뀜, 혹은 개인이 저가 매수에 나서고 외국인이 차익 실현하는 구도 등).
+     b) recent_days에서 순매수(양수)가 몰린 날짜들의 종가 범위를 "매집 구간"으로, 순매도(음수)가 몰린 날짜들의 종가 범위를 "이탈 구간"으로 짚어낼 것 - 실제 수치에 근거해야 하며 데이터에 없는 가격대를 지어내지 말 것. 어느 주체가 그 구간을 주도했는지(기관/외국인/개인 중)도 함께 밝힐 것.
      c) 위에서 짚은 매집/이탈 구간을 근거로 장중 대응 지지선·저항선 및 대응전략(매수/관망/비중축소 중 어느 시점에 어떤 대응)을 구체적으로 제시할 것.
      이 내용을 바탕으로 supply_demand_status를 매집/이탈/혼조 중 하나로 판정할 것.
      supply_demand_date가 target_date보다 이전이면 "직전 영업일 기준" 데이터임을 밝힐 것.
-   - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것.
+   - institution_net_buy/foreign_net_buy/individual_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것.
    - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
 2. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것(financial_products).
 3. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.

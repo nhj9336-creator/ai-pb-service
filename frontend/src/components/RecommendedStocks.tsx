@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { SelectedStock, StockRecommendation } from "@/types/report";
 import { formatKrw, formatUsd } from "@/lib/format";
 
-const DEFAULT_VISIBLE_COUNT = 4;
+const DEFAULT_VISIBLE_COUNT = 3;
 
 interface StockCardProps {
   market: "domestic" | "us";

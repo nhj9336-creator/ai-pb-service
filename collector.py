@@ -314,6 +314,7 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
 
     institution_col = next((c for c in df.columns if "기관" in c), None)
     foreign_col = next((c for c in df.columns if c.startswith("외국인")), None)
+    individual_col = next((c for c in df.columns if "개인" in c), None)
 
     df = df.sort_index().tail(SUPPLY_DEMAND_HISTORY_DAYS)
     history = [
@@ -321,6 +322,7 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
             "date": idx.date().isoformat(),
             "institution_net_buy": _safe_int(row.get(institution_col)) if institution_col else None,
             "foreign_net_buy": _safe_int(row.get(foreign_col)) if foreign_col else None,
+            "individual_net_buy": _safe_int(row.get(individual_col)) if individual_col else None,
         }
         for idx, row in df.iterrows()
     ]
@@ -329,6 +331,7 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
         "date": latest["date"],
         "institution_net_buy": latest["institution_net_buy"],
         "foreign_net_buy": latest["foreign_net_buy"],
+        "individual_net_buy": latest["individual_net_buy"],
         "history": history,
     }
 

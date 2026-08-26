@@ -8,10 +8,11 @@ export interface SupplyDemandDay {
   date: string;
   institution_net_buy: number | null;
   foreign_net_buy: number | null;
+  individual_net_buy: number | null;
 }
 
 export interface SupplyDemand extends SupplyDemandDay {
-  /** 최근 거래일들의 기관/외국인 순매수 시계열(매집 구간 분석용). */
+  /** 최근 거래일들의 기관/외국인/개인 순매수 시계열(매집 구간 분석용). */
   history: SupplyDemandDay[];
 }
 

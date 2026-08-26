@@ -26,16 +26,20 @@ function IndexRow({ label, snapshot }: { label: string; snapshot: IndexSnapshot 
           </div>
         </div>
       </div>
-      {sd && (sd.institution_net_buy !== null || sd.foreign_net_buy !== null) && (
-        <div className="mt-1 flex justify-end gap-3 text-[11px] text-muted">
-          <span>
-            기관 <span className={changeColorClass(sd.institution_net_buy)}>{formatCompactAmount(sd.institution_net_buy)}</span>
-          </span>
-          <span>
-            외인 <span className={changeColorClass(sd.foreign_net_buy)}>{formatCompactAmount(sd.foreign_net_buy)}</span>
-          </span>
-        </div>
-      )}
+      {sd &&
+        (sd.institution_net_buy !== null || sd.foreign_net_buy !== null || sd.individual_net_buy !== null) && (
+          <div className="mt-1 flex justify-end gap-3 text-[11px] text-muted">
+            <span>
+              기관 <span className={changeColorClass(sd.institution_net_buy)}>{formatCompactAmount(sd.institution_net_buy)}</span>
+            </span>
+            <span>
+              외인 <span className={changeColorClass(sd.foreign_net_buy)}>{formatCompactAmount(sd.foreign_net_buy)}</span>
+            </span>
+            <span>
+              개인 <span className={changeColorClass(sd.individual_net_buy)}>{formatCompactAmount(sd.individual_net_buy)}</span>
+            </span>
+          </div>
+        )}
     </div>
   );
 }
