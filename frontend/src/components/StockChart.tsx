@@ -90,15 +90,31 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
 
         <div className="space-y-4 text-sm leading-relaxed text-foreground/90">
           <section>
-            <p className="mb-1 font-semibold text-accent">1. Pivot Point (P, R1/R2, S1/S2)</p>
+            <p className="mb-1 font-semibold text-accent">1. Pivot Point (P, R1, S1)</p>
             <p className="text-muted">
               전일 고가(H)·저가(L)·종가(C)만으로 당일 지지·저항 구간을 추정하는 전통적인 Floor
-              Trader&apos;s Pivot 공식입니다.
+              Trader&apos;s Pivot 공식입니다. 차트에는 가장 핵심적인 3개 선(P, R1, S1)만 표시됩니다.
             </p>
             <ul className="mt-1.5 space-y-0.5 rounded-lg border border-border/60 bg-surface-elevated p-2.5 font-mono text-xs text-foreground/80">
               <li>P (피봇) = (H + L + C) / 3</li>
-              <li>R1 = 2P − L ・ S1 = 2P − H</li>
-              <li>R2 = P + (H − L) ・ S2 = P − (H − L)</li>
+              <li>R1 (1차 저항) = 2P − L</li>
+              <li>S1 (1차 지지) = 2P − H</li>
+            </ul>
+            <ul className="mt-2 space-y-1.5 text-xs text-muted">
+              <li>
+                <span className="font-semibold text-foreground/80">P(피봇) 부근:</span> 전일 매수·매도
+                세력의 균형점입니다. 현재가가 P 위면 단기 매수 우위, 아래면 매도 우위로 해석합니다.
+              </li>
+              <li>
+                <span className="font-semibold text-emerald-400">R1(저항) 돌파 시:</span> 매수세가
+                전일 고점 이상으로 강해졌다는 뜻입니다. 다만 거래량이 뒷받침되지 않으면 상단에서
+                되돌림(가짜 돌파)이 나올 확률이 높으니, 아래 거래량 항목과 함께 확인해야 합니다.
+              </li>
+              <li>
+                <span className="font-semibold text-rose-400">S1(지지) 이탈 시:</span> 매도세가
+                전일 저점 이하까지 우위를 점했다는 뜻으로, 추세 전환 가능성을 열어두고 손절/비중
+                축소를 검토해야 하는 신호로 해석합니다.
+              </li>
             </ul>
           </section>
 
@@ -107,7 +123,9 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
             <p className="text-muted">
               각각 단기(5일)·단중기(20일)·중기(60일)·장기(120일) 추세를 나타냅니다. 짧은
               이평선이 긴 이평선 위에 순서대로 놓이면(MA5&gt;MA20&gt;MA60&gt;MA120) &quot;정배열&quot;로
-              상승추세, 반대 순서면 &quot;역배열&quot;로 하락추세로 해석합니다.
+              상승추세, 반대 순서면 &quot;역배열&quot;로 하락추세로 해석합니다. 정배열 상태에서의
+              눌림목(단기 조정)은 상대적으로 안전한 매수 구간으로, 역배열 상태에서의 반등은
+              추세 전환이 아닌 &quot;일시적 되돌림&quot;으로 보수적으로 접근하는 것이 일반적입니다.
             </p>
           </section>
 
@@ -119,6 +137,13 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
               인식합니다. 최근 60거래일 내 첫 스윙 고점과 마지막 스윙 고점을 직선으로 이은 것이
               저항 추세선, 스윙 저점들을 이은 것이 지지 추세선입니다. 스윙 포인트가 2개 미만이면
               추세선을 표시하지 않습니다(근거 부족 시 임의로 선을 만들지 않음).
+            </p>
+            <p className="mt-1.5 text-xs text-muted">
+              가격이 저항 추세선에 닿고&nbsp;<span className="font-semibold text-foreground/80">거래량 없이</span>&nbsp;
+              반락하면 상단 매물 압박이 여전하다는 뜻이고, 반대로&nbsp;
+              <span className="font-semibold text-foreground/80">거래량을 실은 채</span>&nbsp;
+              돌파하면 새로운 매수 주체 유입으로 해석해 추세 지속 가능성을 높게 봅니다. 지지
+              추세선에서도 동일한 논리가 반대 방향으로 적용됩니다.
             </p>
           </section>
 
@@ -135,8 +160,11 @@ function MethodologyModal({ onClose }: { onClose: () => void }) {
 export default function StockChart({ selection, stock }: StockChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const [rangeMode, setRangeMode] = useState<RangeMode>("1y");
+  // 2024-01부터의 전체 히스토리를 기본으로 보여준다("최근 1년만 보인다"는 혼선을 방지).
+  const [rangeMode, setRangeMode] = useState<RangeMode>("all");
   const [showMethodology, setShowMethodology] = useState(false);
+  const [showLevels, setShowLevels] = useState(true);
+  const [showTrendlines, setShowTrendlines] = useState(true);
 
   const formatPrice = selection.market === "domestic" ? formatKrw : formatUsd;
 
@@ -214,45 +242,50 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       series.setData(lineData);
     }
 
+    // 핵심 지지/저항선만 표시(피봇 P, 1차 저항 R1, 1차 지지 S1) - 나머지(R2/S2)는 산만함을
+    // 줄이기 위해 차트에서 제외한다(수치 자체는 PB 대응 노트/breakout·stop_loss에서 계속 활용).
     const { pivot_point, trend_channel } = stock;
-    const priceLineSpecs: { price: number | null; title: string; color: string }[] = [
-      { price: pivot_point.resistance_2, title: "저항선 R2", color: "#fb7185" },
-      { price: pivot_point.resistance_1, title: "저항선 R1", color: "#f97316" },
-      { price: pivot_point.support_1, title: "지지선 S1", color: "#34d399" },
-      { price: pivot_point.support_2, title: "지지선 S2", color: "#22c55e" },
-    ];
-    for (const spec of priceLineSpecs) {
-      if (spec.price === null) continue;
-      candleSeries.createPriceLine({
-        price: spec.price,
-        color: spec.color,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: spec.title,
-      });
+    if (showLevels) {
+      const priceLineSpecs: { price: number | null; title: string; color: string }[] = [
+        { price: pivot_point.resistance_1, title: "저항선 R1", color: "#f97316" },
+        { price: pivot_point.pivot, title: "피봇 P", color: "#94a3b8" },
+        { price: pivot_point.support_1, title: "지지선 S1", color: "#34d399" },
+      ];
+      for (const spec of priceLineSpecs) {
+        if (spec.price === null) continue;
+        candleSeries.createPriceLine({
+          price: spec.price,
+          color: spec.color,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: spec.title,
+        });
+      }
     }
 
     // 대각선 추세선(고점-고점/저점-저점) 오버레이
-    const trendLineSpecs: { line: TrendLine | null; color: string; title: string }[] = [
-      { line: trend_channel?.resistance_trendline ?? null, color: "#fb923c", title: "저항 추세선" },
-      { line: trend_channel?.support_trendline ?? null, color: "#4ade80", title: "지지 추세선" },
-    ];
-    for (const spec of trendLineSpecs) {
-      const line = spec.line;
-      if (!line || line.start_value === null || line.end_value === null) continue;
-      const series = chart.addSeries(LineSeries, {
-        color: spec.color,
-        lineWidth: 2,
-        lineStyle: LineStyle.Dashed,
-        title: spec.title,
-        lastValueVisible: false,
-        priceLineVisible: false,
-      });
-      series.setData([
-        { time: line.start_date as Time, value: line.start_value },
-        { time: line.end_date as Time, value: line.end_value },
-      ]);
+    if (showTrendlines) {
+      const trendLineSpecs: { line: TrendLine | null; color: string; title: string }[] = [
+        { line: trend_channel?.resistance_trendline ?? null, color: "#fb923c", title: "저항 추세선" },
+        { line: trend_channel?.support_trendline ?? null, color: "#4ade80", title: "지지 추세선" },
+      ];
+      for (const spec of trendLineSpecs) {
+        const line = spec.line;
+        if (!line || line.start_value === null || line.end_value === null) continue;
+        const series = chart.addSeries(LineSeries, {
+          color: spec.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Dashed,
+          title: spec.title,
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
+        series.setData([
+          { time: line.start_date as Time, value: line.start_value },
+          { time: line.end_date as Time, value: line.end_value },
+        ]);
+      }
     }
 
     // 거래량 서브차트 (별도 pane)
@@ -292,7 +325,7 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       chart.remove();
       chartRef.current = null;
     };
-  }, [stock, sliced, selection.market]);
+  }, [stock, sliced, selection.market, showLevels, showTrendlines]);
 
   if (!stock) {
     return (
@@ -320,6 +353,28 @@ export default function StockChart({ selection, stock }: StockChartProps) {
               {ma.label}
             </span>
           ))}
+          <button
+            type="button"
+            onClick={() => setShowLevels((v) => !v)}
+            className={`rounded-full border px-2 py-0.5 font-medium transition-colors ${
+              showLevels
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                : "border-border text-muted hover:border-accent/50 hover:text-accent"
+            }`}
+          >
+            지지/저항선 {showLevels ? "끄기" : "켜기"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowTrendlines((v) => !v)}
+            className={`rounded-full border px-2 py-0.5 font-medium transition-colors ${
+              showTrendlines
+                ? "border-orange-500/40 bg-orange-500/10 text-orange-400"
+                : "border-border text-muted hover:border-accent/50 hover:text-accent"
+            }`}
+          >
+            추세선 {showTrendlines ? "끄기" : "켜기"}
+          </button>
           <button
             type="button"
             onClick={() => setShowMethodology(true)}

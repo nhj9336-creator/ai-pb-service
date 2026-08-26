@@ -93,7 +93,7 @@ FRED_SERIES: dict[str, str] = {
     "US_CPI": "CPIAUCSL",            # 미국 소비자물가지수(CPI, 도시 전체 항목)
 }
 
-NEWS_RSS_QUERIES: list[str] = ["코스피", "미국 증시", "금리"]
+NEWS_RSS_QUERIES: list[str] = ["코스피", "코스닥", "미국 증시", "금리", "반도체", "환율"]
 
 MA_WINDOWS = (5, 20, 60, 120)
 CHART_HISTORY_START_DATE = dt.date(2024, 1, 1)  # 인터랙티브 차트 조회 시작일(약 2.5년치)
@@ -225,6 +225,61 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
         "change_pct": _safe_num(change_pct),
         "volume": _safe_int(last.get("Volume")),
         "price_history": price_history,
+        "source": "yfinance",
+    }
+
+
+# KRX가 직접 발표하는 공식 지수 코드(야후 파이낸스 미러보다 권위 있는 1차 소스)
+KRX_OFFICIAL_INDEX_TICKERS: dict[str, str] = {
+    "KOSPI": "1001",
+    "KOSDAQ": "2001",
+}
+
+
+def _fetch_krx_official_index_snapshot(name: str, index_ticker: str, target_date: dt.date) -> dict:
+    """data.krx.co.kr이 직접 발표하는 공식 지수 종가를 가져온다.
+
+    야후 파이낸스의 ^KS11/^KQ11는 제3자 미러라 KRX 공식 발표치와 미세한 차이가 날 수 있다.
+    이 함수는 KRX 원천 데이터를 사용해 그 오차를 없앤다. 다만 이 엔드포인트도 다른 KRX
+    통계 API와 마찬가지로 로그인 세션을 요구하므로, 로그인 정보가 없거나 조회가 실패하면
+    예외를 던져 호출부가 yfinance로 안전하게 폴백하게 한다(수치 공백보다는 근사치가 낫다).
+    """
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        raise ValueError(f"{name}: KRX 공식 지수 조회에는 로그인 세션이 필요합니다.")
+
+    start_str = (target_date - dt.timedelta(days=30)).strftime("%Y%m%d")
+    end_str = target_date.strftime("%Y%m%d")
+
+    def _fetch() -> pd.DataFrame:
+        return krx.get_index_ohlcv_by_date(start_str, end_str, index_ticker)
+
+    df = _retry_with_backoff(_fetch, context=f"official_index:{name}")
+    if df is None or df.empty:
+        raise ValueError(f"{name}: KRX 공식 지수 데이터를 찾을 수 없습니다.")
+    df = df[df.index.date <= target_date]
+    if df.empty:
+        raise ValueError(f"{name}: {target_date} 이전 KRX 공식 지수 데이터가 없습니다.")
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2] if len(df) >= 2 else None
+    last_close = _safe_num(last["종가"])
+    prev_close = _safe_num(prev["종가"]) if prev is not None else None
+    change = (last_close - prev_close) if (last_close is not None and prev_close is not None) else None
+    change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
+
+    recent = df.tail(SUPPLY_DEMAND_HISTORY_DAYS)
+    price_history = [
+        {"date": idx.date().isoformat(), "close": _safe_num(row["종가"])} for idx, row in recent.iterrows()
+    ]
+
+    return {
+        "date": df.index[-1].date().isoformat(),
+        "close": last_close,
+        "change": _safe_num(change),
+        "change_pct": _safe_num(change_pct),
+        "volume": _safe_int(last.get("거래량")),
+        "price_history": price_history,
+        "source": "KRX",
     }
 
 
@@ -282,6 +337,16 @@ def collect_index_and_flow_data(target_date: dt.date) -> dict:
     for idx, (name, ticker) in enumerate(GLOBAL_INDEX_TICKERS.items()):
         if idx > 0:
             time.sleep(REQUEST_DELAY_SEC)
+
+        # KOSPI/KOSDAQ는 KRX 공식 수치를 우선 시도한다(야후 미러보다 권위 있는 1차 소스).
+        # 실패해도 조용히 yfinance로 폴백하므로 별도 에러를 남기지 않는다.
+        if name in KRX_OFFICIAL_INDEX_TICKERS:
+            try:
+                result[name] = _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
+                continue
+            except Exception:
+                pass
+
         try:
             result[name] = _fetch_yf_index_snapshot(ticker, target_date)
         except Exception as exc:
