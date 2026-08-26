@@ -1,4 +1,5 @@
 import type { SelectedStock, StockRecommendation } from "@/types/report";
+import { formatKrw, formatUsd } from "@/lib/format";
 
 interface StockCardProps {
   market: "domestic" | "us";
@@ -8,6 +9,7 @@ interface StockCardProps {
 }
 
 function StockCard({ market, recommendation, isSelected, onSelect }: StockCardProps) {
+  const formatPrice = market === "domestic" ? formatKrw : formatUsd;
   return (
     <button
       type="button"
@@ -23,12 +25,28 @@ function StockCard({ market, recommendation, isSelected, onSelect }: StockCardPr
         <span className="text-xs text-muted">{recommendation.ticker}</span>
       </div>
       <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-foreground/80">{recommendation.reason}</p>
+
+      {(recommendation.breakout_price !== null || recommendation.stop_loss_price !== null) && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {recommendation.breakout_price !== null && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-400">
+              ▲ 돌파 대응 {formatPrice(recommendation.breakout_price)}
+            </span>
+          )}
+          {recommendation.stop_loss_price !== null && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-400">
+              ▼ 손절 기준 {formatPrice(recommendation.stop_loss_price)}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="mt-3 space-y-1 text-[11px] text-muted">
         <p>
-          <span className="font-medium text-emerald-400">매수 관전 포인트</span> {recommendation.buy_point}
+          <span className="font-medium text-foreground/70">매수 관전 포인트</span> {recommendation.buy_point}
         </p>
         <p>
-          <span className="font-medium text-rose-400">투자 리스크</span> {recommendation.risk}
+          <span className="font-medium text-foreground/70">투자 리스크</span> {recommendation.risk}
         </p>
       </div>
     </button>

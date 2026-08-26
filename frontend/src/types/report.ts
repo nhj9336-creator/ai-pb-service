@@ -2,6 +2,7 @@
 // 각 소스는 부분 실패 시 null/빈 값이 될 수 있으므로 낙관적으로 단정하지 않는다.
 
 export type PbStrategyOpinion = "매수" | "관망" | "비중축소";
+export type SupplyDemandStatus = "매집" | "이탈" | "혼조" | "데이터없음";
 
 export interface SupplyDemandDay {
   date: string;
@@ -104,6 +105,8 @@ export interface StockRecommendation {
   ticker: string;
   reason: string;
   buy_point: string;
+  breakout_price: number | null;
+  stop_loss_price: number | null;
   risk: string;
 }
 
@@ -134,7 +137,9 @@ export interface PbReport {
     summary: string;
     pb_strategy_opinion: PbStrategyOpinion;
     strategy_rationale: string;
+    supply_demand_status: SupplyDemandStatus;
     supply_demand_analysis: string;
+    intraday_playbook: string;
   };
   news_impact_analysis: NewsImpactAnalysis[];
   recommended_stocks: {

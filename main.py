@@ -121,7 +121,7 @@ app = FastAPI(title="AI PB Service", description="AI 기반 Senior PB 리포트 
 
 # 웹 프론트엔드(별도 오리진)에서 API를 호출할 수 있도록 허용.
 # ALLOWED_ORIGINS 환경 변수(콤마 구분)로 배포 도메인을 지정하며, 미설정 시 운영 Vercel 도메인만 허용한다.
-_DEFAULT_ALLOWED_ORIGINS = "https://ai-pb-service-7chm.vercel.app"
+_DEFAULT_ALLOWED_ORIGINS = "https://ai-pb-service-7chm.vercel.app,http://localhost:3000"
 _allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", _DEFAULT_ALLOWED_ORIGINS).split(",")

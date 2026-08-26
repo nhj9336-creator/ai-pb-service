@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI PB 대시보드",
-  description: "AI Senior PB 종합 시장 리포트 대시보드",
+  title: "PB 프라이빗 전략 데스크",
+  description: "Senior PB 실시간 시장 브리핑 및 자산관리 전략 리포트",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

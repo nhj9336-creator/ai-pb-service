@@ -1,7 +1,15 @@
 import SectionCard from "./SectionCard";
 import StrategyBadge from "./StrategyBadge";
+import SupplyDemandBadge from "./SupplyDemandBadge";
 import type { DartDisclosure, MarketData, NewsImpactAnalysis, PbReport } from "@/types/report";
 import { formatDateLabel } from "@/lib/format";
+
+const SUPPLY_DEMAND_ACCENT: Record<string, string> = {
+  매집: "border-l-emerald-500",
+  이탈: "border-l-rose-500",
+  혼조: "border-l-amber-500",
+  데이터없음: "border-l-border",
+};
 
 function DartList({ dart }: { dart: MarketData["dart_disclosures"] }) {
   const items: (DartDisclosure & { code: string })[] = Object.entries(dart ?? {}).flatMap(
@@ -62,20 +70,26 @@ function NewsImpactList({ items }: { items: NewsImpactAnalysis[] }) {
 
 export default function CentralReport({ report }: { report: PbReport }) {
   const { market_overview } = report;
+  const accent = SUPPLY_DEMAND_ACCENT[market_overview.supply_demand_status] ?? "border-l-border";
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <SectionCard title="AI PB 시장 총평" icon={<span>🧭</span>} className="xl:col-span-2">
-        <div className="mb-3">
+      <SectionCard title="시장 총평" icon={<span>🧭</span>} className="xl:col-span-2">
+        <div className="mb-3 flex flex-wrap gap-2">
           <StrategyBadge opinion={market_overview.pb_strategy_opinion} />
+          <SupplyDemandBadge status={market_overview.supply_demand_status} />
         </div>
         <p className="text-sm leading-relaxed text-foreground/90">{market_overview.summary}</p>
         <p className="mt-3 text-sm leading-relaxed text-muted">
-          <span className="font-medium text-foreground/80">전략 근거: </span>
+          <span className="font-medium text-foreground/80">전략 근거 — </span>
           {market_overview.strategy_rationale}
         </p>
-        <div className="mt-4 rounded-lg border border-border/60 bg-surface-elevated p-3">
-          <p className="mb-1 text-xs font-semibold text-muted">기관/외인 수급 해석</p>
+        <div className={`mt-4 rounded-lg border border-border/60 border-l-4 ${accent} bg-surface-elevated p-3`}>
+          <p className="mb-1 text-xs font-semibold text-muted">수급 브리핑 · 매집/이탈 구간</p>
           <p className="text-sm leading-relaxed text-foreground/90">{market_overview.supply_demand_analysis}</p>
+        </div>
+        <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
+          <p className="mb-1 text-xs font-semibold text-accent">장중 대응 시나리오</p>
+          <p className="text-sm leading-relaxed text-foreground/90">{market_overview.intraday_playbook}</p>
         </div>
       </SectionCard>
 

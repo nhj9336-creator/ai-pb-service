@@ -9,7 +9,7 @@ import StockChart from "@/components/StockChart";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import SectionCard from "@/components/SectionCard";
 import { ApiError, fetchLatestReport, generateReportNow } from "@/lib/api";
-import { formatDateLabel, parseDateInputValue, toDateInputValue } from "@/lib/format";
+import { formatDateLabel, formatTimestamp, parseDateInputValue, toDateInputValue } from "@/lib/format";
 import type { PbReport, SelectedStock } from "@/types/report";
 
 export default function Home() {
@@ -66,13 +66,20 @@ export default function Home() {
 
   return (
     <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
-      <header className="flex flex-col gap-1">
-        <h1 className="text-2xl font-bold text-foreground">AI PB 대시보드</h1>
-        <p className="text-sm text-muted">
-          {report
-            ? `기준일 ${formatDateLabel(report.meta.target_date)} · 생성 ${report.meta.generated_at} · ${report.meta.ai_provider}`
-            : "AI Senior PB 종합 시장 리포트"}
-        </p>
+      <header className="flex flex-col gap-2">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">PB 프라이빗 전략 데스크</h1>
+          <p className="text-sm text-muted">Senior PB 실시간 시장 브리핑 · 기준일 {formatDateLabel(toDateInputValue(selectedDate))}</p>
+        </div>
+        {report && (
+          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+            </span>
+            장중 실시간 분석 기준 시각 {formatTimestamp(report.meta.generated_at)}
+          </div>
+        )}
       </header>
 
       <DateController

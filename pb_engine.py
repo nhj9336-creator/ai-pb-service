@@ -39,10 +39,12 @@ DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 REPORT_JSON_TEMPLATE = {
     "market_overview": {
-        "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석",
+        "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석. 결론(헤드라인)을 먼저 던지고 근거 수치로 뒷받침하는 브리핑 톤으로 작성",
         "pb_strategy_opinion": "매수 | 관망 | 비중축소 중 하나",
         "strategy_rationale": "위 전략 의견을 제시한 근거 2~3문장",
-        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인 순매수)을 대조해 (1)기관과 외국인의 매매 방향이 같은지/엇갈리는지, (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간), (3)그 매집/이탈 구간을 기술적 지지·저항선과 겹쳐 본 장중 대응 전략까지 제시할 것. institution_net_buy/foreign_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석 및 technical의 pivot_point 기반 단기 지지/저항선으로 대체할 것",
+        "supply_demand_status": "매집 | 이탈 | 혼조 | 데이터없음 중 하나 (기관/외국인 수급 데이터가 없으면 데이터없음)",
+        "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인 순매수)을 대조해 (1)기관과 외국인의 매매 방향이 같은지/엇갈리는지, (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로, (3)그 매집/이탈 구간을 기술적 지지·저항선과 겹쳐 본 장중 대응 전략까지 제시할 것. institution_net_buy/foreign_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석 및 technical의 pivot_point 기반 단기 지지/저항선으로 대체할 것",
+        "intraday_playbook": "장중 실시간 대응 시나리오 2~3문장. '상승 돌파 시(구체적 가격 이상)' 대응과 '지지선 이탈 시(구체적 가격 이하)' 손절/비중조절 기준을 각각 실제 수치로 명시할 것",
     },
     "news_impact_analysis": [
         {
@@ -59,6 +61,8 @@ REPORT_JSON_TEMPLATE = {
                 "ticker": "종목코드(예: 005930)",
                 "reason": "추천 이유",
                 "buy_point": "매수 관전 포인트(가격대, 이벤트, 기술적 신호 등)",
+                "breakout_price": "상승 돌파 시 추가 매수/대응 기준가(숫자, technical의 resistance_1 등 활용). 판단 불가 시 null",
+                "stop_loss_price": "지지선 이탈 시 손절/비중조절 기준가(숫자, technical의 support_1 등 활용). 판단 불가 시 null",
                 "risk": "투자 리스크",
             }
         ],
@@ -68,6 +72,8 @@ REPORT_JSON_TEMPLATE = {
                 "ticker": "티커(예: AAPL)",
                 "reason": "추천 이유",
                 "buy_point": "매수 관전 포인트",
+                "breakout_price": "상승 돌파 시 대응 기준가(숫자). 판단 불가 시 null",
+                "stop_loss_price": "지지선 이탈 시 손절 기준가(숫자). 판단 불가 시 null",
                 "risk": "투자 리스크",
             }
         ],
@@ -103,6 +109,7 @@ REQUIRED_TOP_LEVEL_KEYS = (
 )
 
 VALID_STRATEGY_OPINIONS = {"매수", "관망", "비중축소"}
+VALID_SUPPLY_DEMAND_STATUS = {"매집", "이탈", "혼조", "데이터없음"}
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +224,7 @@ def build_prompt_context(market_data: dict) -> dict:
     technical = market_data.get("technical") or {}
     return {
         "target_date": market_data.get("meta", {}).get("target_date"),
+        "analysis_timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "indices": _condense_indices(market_data.get("indices")),
         "technical": {
             "domestic": _condense_technical(technical.get("domestic")),
@@ -233,10 +241,21 @@ def build_prompt_context(market_data: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "당신은 20년 경력의 국내 대형 증권사 Senior PB(프라이빗뱅커)입니다. "
-    "고액 자산가 고객에게 매일 아침 배포하는 시장 브리핑 겸 자산관리 리포트를 작성합니다. "
-    "제공된 시장 데이터(지수, 수급, 기술적 지표, 거시경제, 공시, 뉴스)만을 근거로 분석하며, "
-    "데이터에 없는 사실을 지어내지 않습니다. "
+    "당신은 국내 최상위 증권사 Private Banking 센터에서 20년째 UHNW(초고자산가) 고객을 "
+    "전담해온 Senior PB입니다. 매 장중, 고객이 지금 이 순간의 시황을 5분 안에 파악하고 "
+    "바로 의사결정을 내릴 수 있도록 리포트를 씁니다. 이 리포트는 불특정 다수를 위한 "
+    "일반 뉴스 요약이 아니라, 실제 자산을 맡긴 고객 한 명에게 보내는 사적인 전략 노트입니다.\n\n"
+    "문체 원칙:\n"
+    "- 각 항목은 결론(헤드라인 한 문장)을 먼저 던지고, 그 근거가 되는 실제 수치를 바로 이어 "
+    "붙여 대비시킬 것. 예: '외국인 수급이 뚜렷하게 살아나고 있습니다 - 최근 3거래일간 "
+    "6,900원~7,100원 구간에서 순매수 1,200억원이 집중됐습니다' 같은 결론-근거 구조.\n"
+    "- '~함', '~임', '~됨' 같은 개조식 나열체를 쓰지 말 것. 실제 사람이 구두로 브리핑하듯 "
+    "자연스러운 존댓말 문장으로 쓰되, 군더더기 수식어나 '~할 수 있습니다', '~로 보여집니다' "
+    "같은 흐릿한 헷지 표현을 남발하지 말고 단정적으로 판단할 것.\n"
+    "- 모호한 표현('적절히', '유의미하게', '어느 정도') 대신 항상 구체적 수치(가격, %, 금액, "
+    "거래량)로 말할 것. 숫자로 뒷받침되지 않는 주장은 쓰지 말 것.\n"
+    "- 제공된 시장 데이터(지수, 수급, 기술적 지표, 거시경제, 공시, 뉴스)만을 근거로 분석하며, "
+    "데이터에 없는 사실이나 가격을 지어내지 않습니다.\n\n"
     "반드시 요청된 JSON 스키마와 동일한 키 구조로만 응답하고, JSON 이외의 설명이나 "
     "마크다운 코드블록(```) 표시는 절대 포함하지 않습니다."
 )
@@ -245,7 +264,8 @@ SYSTEM_PROMPT = (
 def build_user_prompt(context: dict) -> str:
     schema_str = json.dumps(REPORT_JSON_TEMPLATE, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
-    return f"""아래는 {context.get('target_date')} 기준으로 수집된 시장 데이터입니다.
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 시장 데이터입니다.
+이 시각 이후 시세가 더 움직였을 수 있다는 점을 염두에 두고, "지금 이 시각 기준"임을 리포트 안에서 자연스럽게 드러낼 것.
 
 [시장 데이터]
 {context_str}
@@ -256,10 +276,15 @@ def build_user_prompt(context: dict) -> str:
      a) 기관과 외국인의 매매 방향이 최근 며칠간 같은 방향인지, 엇갈리는지(예: 외국인 매수·기관 매도의 수급 공방).
      b) recent_days에서 순매수(양수)가 몰린 날짜들의 종가 범위를 "매집 구간"으로, 순매도(음수)가 몰린 날짜들의 종가 범위를 "이탈 구간"으로 짚어낼 것 - 실제 수치에 근거해야 하며 데이터에 없는 가격대를 지어내지 말 것.
      c) 위에서 짚은 매집/이탈 구간을 technical.domestic 종목들의 pivot_point(지지/저항선)와 겹쳐 보고, 장중 대응 지지선·저항선 및 대응전략(매수/관망/비중축소 중 어느 시점에 어떤 대응)을 구체적으로 제시할 것.
+     이 내용을 바탕으로 supply_demand_status를 매집/이탈/혼조 중 하나로 판정할 것.
      supply_demand_date가 target_date보다 이전이면 "직전 영업일 기준" 데이터임을 밝힐 것.
-   - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) 이를 명시하고, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
+   - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
+   - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수 또는 대표 종목의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
 2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
-3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것. buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것. ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
+3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
+   - buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것.
+   - breakout_price에는 technical의 resistance_1(또는 prev_high) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
+   - ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
 4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
 5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
 6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic과 recommended_stocks.us는 각각 정확히 2개의 원소를 가질 것.
@@ -371,8 +396,13 @@ def validate_report_schema(report: dict) -> None:
     opinion = overview.get("pb_strategy_opinion")
     if opinion not in VALID_STRATEGY_OPINIONS:
         raise ValueError(f"pb_strategy_opinion 값이 올바르지 않습니다: {opinion!r}")
+    supply_demand_status = overview.get("supply_demand_status")
+    if supply_demand_status not in VALID_SUPPLY_DEMAND_STATUS:
+        raise ValueError(f"supply_demand_status 값이 올바르지 않습니다: {supply_demand_status!r}")
     if not overview.get("supply_demand_analysis"):
         raise ValueError("market_overview.supply_demand_analysis가 비어있습니다.")
+    if not overview.get("intraday_playbook"):
+        raise ValueError("market_overview.intraday_playbook이 비어있습니다.")
 
     stocks = report.get("recommended_stocks", {})
     for key in ("domestic", "us"):
@@ -380,7 +410,7 @@ def validate_report_schema(report: dict) -> None:
         if not isinstance(items, list) or len(items) != 2:
             raise ValueError(f"recommended_stocks.{key}는 정확히 2개의 종목이어야 합니다.")
         for item in items:
-            required_fields = {"name", "ticker", "reason", "buy_point", "risk"}
+            required_fields = {"name", "ticker", "reason", "buy_point", "risk", "breakout_price", "stop_loss_price"}
             if not required_fields.issubset(item):
                 raise ValueError(f"recommended_stocks.{key} 항목에 누락된 필드가 있습니다: {item}")
 

@@ -54,6 +54,14 @@ export function formatDateLabel(dateStr: string | null | undefined): string {
   return d.toLocaleDateString("ko-KR", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
+/** ISO 타임스탬프("2026-08-26T09:51:14")를 "YYYY-MM-DD HH:MM:SS" 형태로 표시한다. */
+export function formatTimestamp(isoString: string | null | undefined): string {
+  if (!isoString) return "-";
+  const [datePart, timePart] = isoString.split("T");
+  if (!timePart) return isoString;
+  return `${datePart} ${timePart.slice(0, 8)}`;
+}
+
 export function toDateInputValue(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");

@@ -182,12 +182,26 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       </div>
       <div ref={containerRef} className="w-full overflow-hidden rounded-xl border border-border/60" />
       <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
-        <p className="mb-1 text-xs font-semibold text-accent">AI 기술적 타점 안내</p>
+        <p className="mb-1 text-xs font-semibold text-accent">PB 대응 노트</p>
         <p className="text-sm leading-relaxed text-foreground/90">{buildTechnicalNote(stock)}</p>
         <p className="mt-2 text-sm leading-relaxed text-muted">
-          <span className="font-medium text-foreground/70">PB 매수 관전 포인트: </span>
+          <span className="font-medium text-foreground/70">매수 관전 포인트 — </span>
           {selection.recommendation.buy_point}
         </p>
+        {(selection.recommendation.breakout_price !== null || selection.recommendation.stop_loss_price !== null) && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {selection.recommendation.breakout_price !== null && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-400">
+                ▲ 돌파 대응 {formatPrice(selection.recommendation.breakout_price)}
+              </span>
+            )}
+            {selection.recommendation.stop_loss_price !== null && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-400">
+                ▼ 손절 기준 {formatPrice(selection.recommendation.stop_loss_price)}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
