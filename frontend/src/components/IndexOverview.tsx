@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import SectionCard from "./SectionCard";
 import type { IndexSnapshot, MacroPoint, MarketData } from "@/types/report";
 import { changeColorClass, formatCompactAmount, formatNumber, formatPercent } from "@/lib/format";
@@ -70,6 +73,8 @@ function MacroRow({ label, series, unit }: { label: string; series: MacroPoint[]
 }
 
 export default function IndexOverview({ marketData }: { marketData: MarketData }) {
+  const [showMoreUs, setShowMoreUs] = useState(false);
+
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
       <SectionCard title="국내 증시" icon={<span>🇰🇷</span>}>
@@ -80,6 +85,23 @@ export default function IndexOverview({ marketData }: { marketData: MarketData }
       <SectionCard title="미국 증시" icon={<span>🇺🇸</span>}>
         <IndexRow label="S&P 500" snapshot={marketData.indices?.SP500 ?? null} />
         <IndexRow label="NASDAQ" snapshot={marketData.indices?.NASDAQ ?? null} />
+        <div
+          className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${
+            showMoreUs ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+          }`}
+        >
+          <div className="overflow-hidden">
+            <IndexRow label="다우존스" snapshot={marketData.indices?.DJI ?? null} />
+            <IndexRow label="필라델피아 반도체" snapshot={marketData.indices?.SOX ?? null} />
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setShowMoreUs((v) => !v)}
+          className="mt-2 w-full rounded-lg border border-dashed border-border py-1.5 text-[11px] font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent"
+        >
+          {showMoreUs ? "지수 접기" : "지수 더보기 (다우존스 · 반도체지수)"}
+        </button>
       </SectionCard>
 
       <SectionCard title="FRED 거시경제" icon={<span>💵</span>}>

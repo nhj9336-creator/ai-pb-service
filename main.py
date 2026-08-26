@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.gzip import GZipMiddleware
 
 from collector import collect_market_data
 from pb_engine import OUTPUT_PATH_DEFAULT, generate_pb_report
@@ -134,6 +135,10 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# 차트 히스토리 확장(2024-01~현재, 종목 유니버스 22개)으로 리포트 payload가 수 MB로 커져
+# 압축 없이는 전송이 느릴 수 있다.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 class GenerateNowRequest(BaseModel):

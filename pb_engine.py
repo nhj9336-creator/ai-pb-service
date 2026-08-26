@@ -173,6 +173,19 @@ def _condense_indices(indices: dict) -> dict:
     return condensed
 
 
+def _condense_volume_momentum(volumes: list) -> dict:
+    """최근 거래량을 최근 20거래일 평균과 비교해 돌파/이탈의 신뢰도(거래량 실림 여부)를 판단할
+    근거를 만든다."""
+    clean = [v for v in (volumes or []) if v is not None]
+    if not clean:
+        return {"latest_volume": None, "avg_volume_20d": None, "volume_ratio": None}
+    latest = clean[-1]
+    window = clean[-20:]
+    avg20 = sum(window) / len(window) if window else None
+    ratio = round(latest / avg20, 2) if avg20 else None
+    return {"latest_volume": latest, "avg_volume_20d": round(avg20) if avg20 else None, "volume_ratio": ratio}
+
+
 def _condense_technical(technical: dict) -> dict:
     condensed = {}
     for code, t in (technical or {}).items():
@@ -190,6 +203,8 @@ def _condense_technical(technical: dict) -> dict:
             "trend": _describe_trend(close, mas),
             "pivot_point": t.get("pivot_point"),
             "support_resistance": t.get("support_resistance"),
+            "trend_channel": t.get("trend_channel"),
+            "volume_momentum": _condense_volume_momentum(t.get("volume")),
         }
     return condensed
 
@@ -300,9 +315,14 @@ def build_user_prompt(context: dict) -> str:
    - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
    - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수 또는 대표 종목의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
 2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
-3. technical.domestic에 있는 국내 종목 {DOMESTIC_RECOMMENDATION_COUNT}개 전부, technical.us에 있는 미국 종목 {US_RECOMMENDATION_COUNT}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목의 trend(이동평균 정배열/역배열 여부)·수급(institution_net_buy/foreign_net_buy가 있는 경우)·pivot_point 위치 등 객관적 지표에 근거해 종목별로 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것. 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
-   - buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것.
-   - breakout_price에는 technical의 resistance_1(또는 prev_high) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
+3. technical.domestic에 있는 국내 종목 {DOMESTIC_RECOMMENDATION_COUNT}개 전부, technical.us에 있는 미국 종목 {US_RECOMMENDATION_COUNT}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목마다 다음 4가지 객관적 지표를 전부 종합해 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것:
+   a) moving_averages/trend: 이동평균 정배열(상승 추세)/역배열(하락 추세)/혼조 여부.
+   b) pivot_point: 피봇 기준 지지선(support_1/2)·저항선(resistance_1/2) 가격대.
+   c) trend_channel: 고점-고점을 이은 저항 추세선(resistance_trendline), 저점-저점을 이은 지지 추세선(support_trendline)의 최근 값과 방향(상승/하락/횡보). null이면 추세선을 판단할 스윙 포인트가 부족하다는 뜻이니 언급하지 말 것.
+   d) volume_momentum: latest_volume이 avg_volume_20d 대비 몇 배(volume_ratio)인지 - ratio가 1.5 이상이면 "거래량을 실은" 신뢰도 높은 신호, 1.0 미만이면 "거래량이 실리지 않은" 약한 신호로 명시적으로 구분할 것.
+   각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
+   - buy_point에는 위 a)~d)를 종합한 구체적 매매 전략 노트를 쓸 것. 예: "MA5>MA20>MA60 정배열 유지 중, 저항 추세선(약 OOO)과 피봇 저항선(약 OOO)이 겹치는 구간을 거래량 동반(ratio 1.5배 이상) 돌파하면 추가 매수, 지지 추세선(약 OOO) 이탈 시에는 거래량 증가 여부와 무관하게 비중 축소" 같이 구체적 가격·배수와 함께 서술할 것.
+   - breakout_price에는 technical의 resistance_1(또는 prev_high, 저항 추세선 근접값) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low, 지지 추세선 근접값) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
    - ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
 4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
 5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.

@@ -46,6 +46,19 @@ export interface SupportResistance {
   prev_low_60d: number | null;
 }
 
+export interface TrendLine {
+  start_date: string;
+  start_value: number | null;
+  end_date: string;
+  end_value: number | null;
+  direction: "상승" | "하락" | "횡보";
+}
+
+export interface TrendChannel {
+  resistance_trendline: TrendLine | null;
+  support_trendline: TrendLine | null;
+}
+
 export interface TechnicalStock {
   name: string;
   dates: string[];
@@ -60,6 +73,7 @@ export interface TechnicalStock {
   ma120: (number | null)[];
   pivot_point: PivotPoint;
   support_resistance: SupportResistance;
+  trend_channel: TrendChannel;
 }
 
 export interface MacroPoint {
@@ -83,7 +97,7 @@ export interface NewsItem {
 }
 
 export interface MarketData {
-  indices: Record<"KOSPI" | "KOSDAQ" | "SP500" | "NASDAQ", IndexSnapshot | null>;
+  indices: Record<"KOSPI" | "KOSDAQ" | "SP500" | "NASDAQ" | "DJI" | "SOX", IndexSnapshot | null>;
   technical: {
     domestic: Record<string, TechnicalStock | null>;
     us: Record<string, TechnicalStock | null>;

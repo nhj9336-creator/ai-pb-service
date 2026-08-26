@@ -44,6 +44,8 @@ GLOBAL_INDEX_TICKERS: dict[str, str] = {
     "KOSDAQ": "^KQ11",
     "SP500": "^GSPC",
     "NASDAQ": "^IXIC",
+    "DJI": "^DJI",   # 다우존스 산업지수
+    "SOX": "^SOX",   # 필라델피아 반도체 지수
 }
 
 # 기관/외국인 순매수 수급은 국내(KRX) 시장에만 존재
@@ -94,7 +96,9 @@ FRED_SERIES: dict[str, str] = {
 NEWS_RSS_QUERIES: list[str] = ["코스피", "미국 증시", "금리"]
 
 MA_WINDOWS = (5, 20, 60, 120)
-OHLCV_LOOKBACK_DAYS = 120
+CHART_HISTORY_START_DATE = dt.date(2024, 1, 1)  # 인터랙티브 차트 조회 시작일(약 2.5년치)
+OHLCV_MAX_BARS = 800  # 페이로드 폭주 방지용 안전 상한(2024-01 기준 실제 거래일수보다 넉넉함)
+TREND_CHANNEL_LOOKBACK = 60  # 대각선 추세선(고점-고점/저점-저점) 계산에 사용할 최근 거래일수
 DART_LOOKBACK_DAYS = 7
 DART_UNIVERSE_SIZE = 20  # DART 공시를 조회할 시가총액 상위 종목 수
 DART_DISCLOSURES_PER_STOCK = 3  # 종목당 프롬프트에 넘길 최근 공시 개수(유니버스 확대에 따른 과다 방지)
@@ -331,9 +335,68 @@ def _compute_support_resistance(df: pd.DataFrame) -> dict:
     return result
 
 
+def _find_swing_indices(values: pd.Series, window: int, mode: str) -> list[int]:
+    """values 내에서 앞뒤 window개 봉보다 극단적인(고점/저점) 위치의 정수 인덱스 목록을 찾는다.
+
+    표준 프랙탈(fractal) 스윙 포인트 정의: 중심 봉의 값이 좌우 window개씩을 포함한 구간에서
+    최댓값(mode='high')이거나 최솟값(mode='low')이면 스윙 포인트로 본다.
+    """
+    n = len(values)
+    idxs: list[int] = []
+    for i in range(window, n - window):
+        segment = values.iloc[i - window : i + window + 1]
+        target = values.iloc[i]
+        if mode == "high" and target == segment.max():
+            idxs.append(i)
+        elif mode == "low" and target == segment.min():
+            idxs.append(i)
+    return idxs
+
+
+def _compute_trend_channel(df: pd.DataFrame) -> dict:
+    """최근 TREND_CHANNEL_LOOKBACK 거래일 내 고점-고점, 저점-저점을 이은 대각선 추세선을 계산한다.
+
+    표준 기술적 분석의 프랙탈 스윙 포인트 방식으로 고점/저점을 찾고, 구간 내 첫 번째와 마지막
+    스윙 포인트를 직선으로 연결해 마지막 봉(가장 최근 거래일) 위치까지 연장한 값을 반환한다.
+    스윙 포인트가 2개 미만이면(추세를 판단할 근거가 부족하면) null을 반환하고 억지로 선을
+    만들지 않는다.
+    """
+    recent = df.tail(TREND_CHANNEL_LOOKBACK)
+    if len(recent) < 10:
+        return {"resistance_trendline": None, "support_trendline": None}
+
+    dates = list(recent.index)
+    last_i = len(recent) - 1
+
+    def _line_from_swings(values: pd.Series, mode: str) -> Optional[dict]:
+        idxs = _find_swing_indices(values, window=2, mode=mode)
+        if len(idxs) < 2:
+            return None
+        i1, i2 = idxs[0], idxs[-1]
+        if i1 == i2:
+            return None
+        v1, v2 = _safe_num(values.iloc[i1]), _safe_num(values.iloc[i2])
+        if v1 is None or v2 is None:
+            return None
+        slope = (v2 - v1) / (i2 - i1)
+        end_value = v1 + slope * (last_i - i1)
+        return {
+            "start_date": dates[i1].date().isoformat(),
+            "start_value": _safe_num(v1),
+            "end_date": dates[last_i].date().isoformat(),
+            "end_value": _safe_num(end_value),
+            "direction": "상승" if slope > 0 else ("하락" if slope < 0 else "횡보"),
+        }
+
+    return {
+        "resistance_trendline": _line_from_swings(recent["고가"], "high"),
+        "support_trendline": _line_from_swings(recent["저가"], "low"),
+    }
+
+
 def _build_technical_payload(df: pd.DataFrame, name: str) -> dict:
     """시가/고가/저가/종가/거래량(한글 컬럼) DataFrame으로부터 차트용 페이로드를 만든다."""
-    df = df.tail(OHLCV_LOOKBACK_DAYS).copy()
+    df = df.tail(OHLCV_MAX_BARS).copy()
 
     # KRX/yfinance가 드물게 손상된 문자열 값을 섞어 보내는 경우를 대비해 숫자 컬럼을 정리한다.
     # 정리 후에도 시가/고가/저가/종가가 유효하지 않은 행은 제외한다(거래량은 부가 정보라 유지).
@@ -359,13 +422,13 @@ def _build_technical_payload(df: pd.DataFrame, name: str) -> dict:
         **{f"ma{w}": [_safe_num(v) for v in df[f"MA{w}"]] for w in MA_WINDOWS},
         "pivot_point": _compute_pivot_levels(df),
         "support_resistance": _compute_support_resistance(df),
+        "trend_channel": _compute_trend_channel(df),
     }
 
 
 def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
     end_str = target_date.strftime("%Y%m%d")
-    # 영업일 기준 120일을 확보하기 위해 달력일 기준 넉넉히 조회 후 tail로 자른다.
-    start_str = (target_date - dt.timedelta(days=int(OHLCV_LOOKBACK_DAYS * 2.2))).strftime("%Y%m%d")
+    start_str = CHART_HISTORY_START_DATE.strftime("%Y%m%d")
 
     def _fetch() -> pd.DataFrame:
         return krx.get_market_ohlcv_by_date(start_str, end_str, code)
@@ -378,7 +441,7 @@ def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
 
 
 def _fetch_us_stock_technical(ticker: str, name: str, target_date: dt.date) -> dict:
-    start = target_date - dt.timedelta(days=int(OHLCV_LOOKBACK_DAYS * 2.2))
+    start = CHART_HISTORY_START_DATE
     end = target_date + dt.timedelta(days=1)
 
     def _fetch() -> pd.DataFrame:
