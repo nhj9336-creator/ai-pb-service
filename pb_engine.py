@@ -42,7 +42,7 @@ REPORT_JSON_TEMPLATE = {
         "summary": "국내외 지수, 수급, 거시지표를 종합한 3~5문장 시장 흐름 분석",
         "pb_strategy_opinion": "매수 | 관망 | 비중축소 중 하나",
         "strategy_rationale": "위 전략 의견을 제시한 근거 2~3문장",
-        "supply_demand_analysis": "국내 증시 기관/외국인 순매수 동향과 그 의미에 대한 해석 2~3문장",
+        "supply_demand_analysis": "국내 증시 기관/외국인 순매수 동향 해석 2~3문장. 수급 수치가 없으면 등락률·거래량 기반 장중 모멘텀 해석으로 대체하고 그 사실을 명시",
     },
     "news_impact_analysis": [
         {
@@ -131,6 +131,10 @@ def _condense_indices(indices: dict) -> dict:
             "date": snap.get("date"),
             "close": snap.get("close"),
             "change_pct": snap.get("change_pct"),
+            "volume": snap.get("volume"),
+            # sd가 없으면(KRX 로그인 미설정 등) institution/foreign은 null로 남으며,
+            # 이 경우 프롬프트에서 거래량·등락률 기반 모멘텀 분석으로 대체하도록 안내한다.
+            "supply_demand_date": sd.get("date") if sd else None,
             "institution_net_buy": sd.get("institution_net_buy") if sd else None,
             "foreign_net_buy": sd.get("foreign_net_buy") if sd else None,
         }
@@ -231,9 +235,11 @@ def build_user_prompt(context: dict) -> str:
 {context_str}
 
 [작성 요구사항]
-1. 국내/미국 지수, 수급, 거시지표를 종합해 시장 흐름을 분석하고, PB로서 매수/관망/비중축소 중 하나의 전략 의견을 제시할 것. indices의 국내 지수(KOSPI/KOSDAQ) institution_net_buy/foreign_net_buy 수치를 근거로 기관/외국인 수급 동향을 별도로 해석할 것(supply_demand_analysis).
+1. 국내/미국 지수, 수급, 거시지표를 종합해 시장 흐름을 분석하고, PB로서 매수/관망/비중축소 중 하나의 전략 의견을 제시할 것.
+   - indices의 국내 지수(KOSPI/KOSDAQ) institution_net_buy/foreign_net_buy 수치가 있으면 이를 근거로 기관/외국인 수급 동향을 해석할 것(supply_demand_analysis). supply_demand_date가 target_date보다 이전이면 "직전 영업일 기준" 데이터임을 밝힐 것.
+   - institution_net_buy/foreign_net_buy가 모두 null이면(장중 미집계 또는 데이터 미제공) 수급 데이터가 아직 없다는 점을 명시하고, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
 2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
-3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것. ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
+3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것. buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것. ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
 4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
 5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
 6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic과 recommended_stocks.us는 각각 정확히 2개의 원소를 가질 것.

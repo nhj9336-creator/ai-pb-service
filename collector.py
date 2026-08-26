@@ -194,7 +194,21 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
 
 
 def _fetch_krx_supply_demand(market: str, target_date: dt.date, max_lookback: int = 10) -> dict:
-    """target_date로부터 최대 max_lookback일 역순으로 최근 거래일 수급 데이터를 찾는다."""
+    """target_date로부터 최대 max_lookback일 역순으로 최근 거래일 수급 데이터를 찾는다.
+
+    KRX의 투자자별 거래실적(기관/외국인 순매수) 엔드포인트는 data.krx.co.kr 로그인 세션을
+    요구한다 - 비로그인 요청은 날짜/형식과 무관하게 서버가 HTTP 400 "LOGOUT"으로 즉시
+    거부한다는 것을 실제 요청으로 확인했다. KRX_ID/KRX_PW 환경변수가 없으면 pykrx가 처음부터
+    비인증 세션으로 요청하므로, 여기서 미리 걸러 불필요한 최대 10회 요청을 반복하지 않고
+    정확한 사유로 즉시 실패한다. 두 환경변수를 설정하면(pykrx가 자동으로 사용) 아래 조회
+    로직이 정상적으로 동작하며 최근 영업일로 자동 폴백한다.
+    """
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        raise ValueError(
+            f"{market}: 기관/외국인 수급 데이터는 KRX 로그인 세션이 있어야 조회할 수 있습니다 "
+            "(KRX_ID/KRX_PW 환경변수 미설정 - data.krx.co.kr가 비로그인 요청을 거부함)."
+        )
+
     for offset in range(max_lookback):
         d = target_date - dt.timedelta(days=offset)
         date_str = d.strftime("%Y%m%d")
@@ -212,7 +226,9 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date, max_lookback: in
             "institution_net_buy": _safe_int(row.get(institution_col)) if institution_col else None,
             "foreign_net_buy": _safe_int(row.get(foreign_col)) if foreign_col else None,
         }
-    raise ValueError(f"{market}: {target_date} 기준 수급 데이터를 찾을 수 없습니다.")
+    raise ValueError(
+        f"{market}: {target_date} 기준 최근 {max_lookback}일 내 수급 데이터를 찾을 수 없습니다."
+    )
 
 
 def collect_index_and_flow_data(target_date: dt.date) -> dict:

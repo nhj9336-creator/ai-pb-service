@@ -12,6 +12,10 @@ services:
         sync: false
       - key: FRED_API_KEY
         sync: false
+      - key: KRX_ID
+        sync: false
+      - key: KRX_PW
+        sync: false
       - key: AI_PROVIDER
         sync: false
       - key: OPENAI_API_KEY
