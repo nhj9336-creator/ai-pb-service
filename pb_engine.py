@@ -88,11 +88,15 @@ REPORT_JSON_TEMPLATE = {
     ],
     "portfolio_allocation": {
         "assets": [
-            {"name": "국내주식", "percent": 30},
-            {"name": "미국주식", "percent": 25},
-            {"name": "채권/MMF", "percent": 20},
-            {"name": "리츠/대체투자", "percent": 10},
-            {"name": "현금성자산", "percent": 15},
+            {
+                "name": "국내주식",
+                "percent": 30,
+                "representative_instruments": "해당 자산군의 구체적 대표 종목/ETF 실명(예: KODEX 200(069500), 삼성전자(005930))과 비중 조절 가이드 1문장",
+            },
+            {"name": "미국주식", "percent": 25, "representative_instruments": "예: TIGER 미국S&P500(360750) 또는 SPY, QQQ 등 실제 상품명"},
+            {"name": "채권/MMF", "percent": 20, "representative_instruments": "예: TLT, KODEX 국고채3년, CMA/MMF 상품명"},
+            {"name": "리츠/대체투자", "percent": 10, "representative_instruments": "예: 국내외 리츠 ETF 실명"},
+            {"name": "현금성자산", "percent": 15, "representative_instruments": "파킹형 상품 또는 단기 CMA 등"},
         ],
         "rebalancing_strategy": "현재 시장 상황에 맞춘 리밸런싱 전략 2~3문장 (예: 비중 확대/축소할 자산군과 그 이유, 리밸런싱 주기 제안)",
     },
@@ -202,11 +206,15 @@ def _condense_macro(macro: dict) -> dict:
 
 
 def _condense_dart(dart: dict, limit_per_stock: int = 3) -> dict:
+    # 종목 유니버스가 넓어(최대 20개+) 대부분은 당일 공시가 없다 - 빈 배열까지 프롬프트에
+    # 넣으면 토큰만 낭비하므로 실제 공시가 있는 종목만 남긴다.
     condensed = {}
     for code, items in (dart or {}).items():
+        if not items:
+            continue
         condensed[code] = [
             {"corp_name": i.get("corp_name"), "report_nm": i.get("report_nm"), "rcept_dt": i.get("rcept_dt")}
-            for i in (items or [])[:limit_per_stock]
+            for i in items[:limit_per_stock]
         ]
     return condensed
 
@@ -256,6 +264,12 @@ SYSTEM_PROMPT = (
     "거래량)로 말할 것. 숫자로 뒷받침되지 않는 주장은 쓰지 말 것.\n"
     "- 제공된 시장 데이터(지수, 수급, 기술적 지표, 거시경제, 공시, 뉴스)만을 근거로 분석하며, "
     "데이터에 없는 사실이나 가격을 지어내지 않습니다.\n\n"
+    "객관성 원칙: 당신은 감정도, 직관적 추측도 배제한 정량 분석가입니다. "
+    "'기대된다', '전망이 밝다', '분위기가 좋다' 같은 정성적·심리적 표현을 쓰지 말 것. "
+    "모든 판단(추천/비추천, 매수/관망/비중축소, 돌파/이탈 대응)은 반드시 다음 중 하나 이상의 "
+    "객관적 지표를 명시적으로 인용해 뒷받침할 것: (1) 이동평균선 정배열/역배열 여부, "
+    "(2) Pivot 기반 지지선·저항선 수치, (3) 거래량 및 등락률, (4) 기관/외국인 순매수 수급 수치, "
+    "(5) 금리·CPI 등 거시지표. 근거 지표를 특정하지 못하는 판단은 서술하지 말 것.\n\n"
     "반드시 요청된 JSON 스키마와 동일한 키 구조로만 응답하고, JSON 이외의 설명이나 "
     "마크다운 코드블록(```) 표시는 절대 포함하지 않습니다."
 )
@@ -281,12 +295,12 @@ def build_user_prompt(context: dict) -> str:
    - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
    - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수 또는 대표 종목의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
 2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
-3. technical.domestic에 있는 종목 중 국내 유망 종목 2개, technical.us에 있는 종목 중 미국 유망 종목 2개를 선정하고, 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
+3. technical.domestic/technical.us에는 초대형주부터 섹터별 중형 성장주까지 다양한 종목이 들어있다. 시가총액이나 지명도만으로 고르지 말고, 각 종목의 trend(이동평균 정배열 여부)·수급(institution_net_buy/foreign_net_buy가 있는 경우)·pivot_point 위치 등 객관적 지표를 비교해 국내 유망 종목 2개, 미국 유망 종목 2개를 선정할 것. 초대형 우량주 2개로만 채우지 말고 가능하면 서로 다른 섹터에서 고를 것 - 특정 종목이 유독 지표상 우월하다면 예외적으로 허용하되 그 경우 이유를 reason에 명확히 밝힐 것. 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
    - buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것.
    - breakout_price에는 technical의 resistance_1(또는 prev_high) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
    - ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
 4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
-5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
+5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
 6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic과 recommended_stocks.us는 각각 정확히 2개의 원소를 가질 것.
 
 [출력 JSON 스키마]
@@ -427,6 +441,8 @@ def validate_report_schema(report: dict) -> None:
     for asset in assets:
         if "name" not in asset or "percent" not in asset:
             raise ValueError(f"portfolio_allocation.assets 항목에 name/percent가 필요합니다: {asset}")
+        if not asset.get("representative_instruments"):
+            raise ValueError(f"portfolio_allocation.assets 항목에 representative_instruments가 필요합니다: {asset}")
         total_percent += asset["percent"]
     if not (95 <= total_percent <= 105):
         raise ValueError(f"portfolio_allocation.assets의 percent 합계가 100에서 크게 벗어났습니다: {total_percent}")

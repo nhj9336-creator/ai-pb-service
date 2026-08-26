@@ -49,22 +49,35 @@ KRX_SUPPLY_DEMAND_MARKETS: dict[str, str] = {
     "KOSDAQ": "KOSDAQ",
 }
 
-# 기술적 지표(OHLCV/이평선/지지·저항)를 수집할 국내 주요 종목 (KRX 종목코드 -> 종목명)
+# 기술적 지표(OHLCV/이평선/지지·저항)를 수집할 국내 종목 유니버스 (KRX 종목코드 -> 종목명).
+# 초대형주 편중을 피하기 위해 반도체/자동차/2차전지/플랫폼/바이오/게임 등 주도 섹터별로
+# 중형주까지 섞어 구성한다 - AI 추천은 이 유니버스 내에서만 가능하므로 다양성의 원천이 된다.
 MAJOR_STOCKS: dict[str, str] = {
-    "005930": "삼성전자",
-    "000660": "SK하이닉스",
-    "035420": "NAVER",
-    "005380": "현대차",
-    "051910": "LG화학",
+    "005930": "삼성전자",       # 반도체
+    "000660": "SK하이닉스",     # 반도체
+    "035420": "NAVER",         # 플랫폼
+    "035720": "카카오",         # 플랫폼
+    "005380": "현대차",         # 자동차
+    "012330": "현대모비스",     # 자동차부품
+    "051910": "LG화학",        # 2차전지/화학
+    "006400": "삼성SDI",       # 2차전지
+    "373220": "LG에너지솔루션", # 2차전지
+    "207940": "삼성바이오로직스", # 바이오
+    "068270": "셀트리온",       # 바이오
+    "259960": "크래프톤",       # 게임(중형주)
 }
 
-# 기술적 지표를 수집할 미국 주요 종목 (티커 -> 종목명)
+# 기술적 지표를 수집할 미국 종목 유니버스 (티커 -> 종목명). 메가캡 위주에 반도체/AI 성장주를 더해
+# 섹터 다양성을 확보한다.
 US_STOCKS: dict[str, str] = {
     "AAPL": "Apple",
     "MSFT": "Microsoft",
     "NVDA": "NVIDIA",
     "GOOGL": "Alphabet",
     "TSLA": "Tesla",
+    "AMD": "AMD",
+    "AVGO": "Broadcom",
+    "PLTR": "Palantir",
 }
 
 FRED_SERIES: dict[str, str] = {
@@ -78,6 +91,8 @@ NEWS_RSS_QUERIES: list[str] = ["코스피", "미국 증시", "금리"]
 MA_WINDOWS = (5, 20, 60, 120)
 OHLCV_LOOKBACK_DAYS = 120
 DART_LOOKBACK_DAYS = 7
+DART_UNIVERSE_SIZE = 20  # DART 공시를 조회할 시가총액 상위 종목 수
+DART_DISCLOSURES_PER_STOCK = 3  # 종목당 프롬프트에 넘길 최근 공시 개수(유니버스 확대에 따른 과다 방지)
 NEWS_ITEMS_PER_QUERY = 5
 FRED_LOOKBACK_OBS = 24
 
@@ -443,13 +458,41 @@ def collect_macro_data(target_date: dt.date) -> dict:
 # 4. DART 주요 공시
 # ---------------------------------------------------------------------------
 
+def _fetch_top_market_cap_codes(target_date: dt.date, top_n: int = DART_UNIVERSE_SIZE) -> dict[str, str]:
+    """시가총액 상위 top_n개 종목의 {코드: 코드}를 반환한다.
+
+    DART 공시 조회 대상을 초대형주 몇 종목에서 벗어나 폭넓게 확장하기 위한 용도라
+    표시용 종목명은 필요 없다(DART 응답 자체의 corp_name을 그대로 쓴다). 이 조회가
+    실패해도(예: KRX 로그인 필요, 일시 오류) 빈 dict를 반환해 호출부가 기존 MAJOR_STOCKS
+    만으로 안전하게 계속 진행하게 한다 - DART 대상 확장은 부가 기능이지 필수 경로가 아니다.
+    """
+    # get_market_trading_value_by_date와 마찬가지로 이 엔드포인트도 KRX 로그인 세션을
+    # 요구한다(비로그인 시 즉시 실패가 확정적이므로 불필요한 재시도를 생략한다).
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        return {}
+
+    date_str = target_date.strftime("%Y%m%d")
+
+    def _fetch() -> pd.DataFrame:
+        return krx.get_market_cap_by_ticker(date_str, market="ALL")
+
+    try:
+        df = _retry_with_backoff(_fetch, context="market_cap")
+    except Exception:
+        return {}
+    if df is None or df.empty or "시가총액" not in df.columns:
+        return {}
+    top = df.sort_values("시가총액", ascending=False).head(top_n)
+    return {str(code): str(code) for code in top.index}
+
+
 def _fetch_dart_disclosures(dart: "OpenDartReader", code: str, name: str, target_date: dt.date) -> list[dict]:
     start = (target_date - dt.timedelta(days=DART_LOOKBACK_DAYS)).strftime("%Y%m%d")
     end = target_date.strftime("%Y%m%d")
     df = dart.list(code, start=start, end=end)
     if df is None or df.empty:
         return []
-    df = df.sort_values("rcept_dt", ascending=False).head(5)
+    df = df.sort_values("rcept_dt", ascending=False).head(DART_DISCLOSURES_PER_STOCK)
     return [
         {
             "corp_name": row.get("corp_name", name),
@@ -463,7 +506,12 @@ def _fetch_dart_disclosures(dart: "OpenDartReader", code: str, name: str, target
 
 
 def collect_dart_disclosures(target_date: dt.date, stocks: Optional[dict] = None) -> dict:
-    stocks = stocks or MAJOR_STOCKS
+    if stocks is None:
+        # 기본값: 고정 유니버스(MAJOR_STOCKS, 이름 보존) + 시가총액 상위 종목(코드만, 이름 중복 방지)
+        stocks = dict(MAJOR_STOCKS)
+        for code, name in _fetch_top_market_cap_codes(target_date).items():
+            stocks.setdefault(code, name)
+
     api_key = os.getenv("DART_API_KEY")
     if not api_key or OpenDartReader is None:
         return {

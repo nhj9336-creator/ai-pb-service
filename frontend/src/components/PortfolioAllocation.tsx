@@ -70,6 +70,21 @@ export default function PortfolioAllocation({
               </PieChart>
             </ResponsiveContainer>
           </div>
+          <ul className="mt-3 space-y-2">
+            {allocation.assets.map((a, idx) => (
+              <li key={a.name} className="rounded-lg border border-border/60 bg-surface-elevated p-2.5">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: PALETTE[idx % PALETTE.length] }}
+                  />
+                  <span className="text-sm font-semibold text-foreground">{a.name}</span>
+                  <span className="ml-auto text-sm font-semibold text-foreground">{a.percent}%</span>
+                </div>
+                <p className="mt-1 pl-5 text-xs text-muted">{a.representative_instruments}</p>
+              </li>
+            ))}
+          </ul>
           <div className="mt-3 rounded-lg border border-border/60 bg-surface-elevated p-3">
             <p className="mb-1 text-xs font-semibold text-muted">리밸런싱 전략</p>
             <p className="text-sm leading-relaxed text-foreground/90">{allocation.rebalancing_strategy}</p>

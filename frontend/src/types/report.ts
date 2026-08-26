@@ -120,6 +120,7 @@ export interface FinancialProduct {
 export interface PortfolioAsset {
   name: string;
   percent: number;
+  representative_instruments: string;
 }
 
 export interface PortfolioAllocation {
