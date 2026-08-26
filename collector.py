@@ -12,6 +12,7 @@ dict로 반환한다.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import re
 import time
@@ -31,6 +32,8 @@ except ImportError:  # pragma: no cover
     OpenDartReader = None
 
 load_dotenv()
+
+logger = logging.getLogger("ai-pb-service.collector")
 
 # ---------------------------------------------------------------------------
 # 설정
@@ -78,6 +81,8 @@ US_STOCKS: dict[str, str] = {
     "AMD": "AMD",
     "AVGO": "Broadcom",
     "PLTR": "Palantir",
+    "AMZN": "Amazon",
+    "META": "Meta Platforms",
 }
 
 FRED_SERIES: dict[str, str] = {
@@ -482,6 +487,15 @@ def _fetch_top_market_cap_codes(target_date: dt.date, top_n: int = DART_UNIVERSE
         return {}
     if df is None or df.empty or "시가총액" not in df.columns:
         return {}
+
+    # 우선주는 KRX 관행상 보통주 코드의 마지막 자리만 다르며(예: 005930 -> 005935),
+    # DART는 법인 단위로만 공시를 관리해 우선주 자체의 고유 조회 코드가 없는 경우가 많다.
+    # 시가총액 상위권에 우선주가 섞여 있으면 대부분 그 본주도 이미 상위권에 있으므로,
+    # DART 조회 대상 선정 단계에서부터 우선주로 추정되는 코드는 제외해 불필요한 조회
+    # 실패를 원천 차단한다(코드 자체는 마지막 자리 "0"인 것을 보통주로 간주).
+    df = df[df.index.to_series().str.fullmatch(r"\d{6}0")]
+    if df.empty:
+        return {}
     top = df.sort_values("시가총액", ascending=False).head(top_n)
     return {str(code): str(code) for code in top.index}
 
@@ -489,7 +503,16 @@ def _fetch_top_market_cap_codes(target_date: dt.date, top_n: int = DART_UNIVERSE
 def _fetch_dart_disclosures(dart: "OpenDartReader", code: str, name: str, target_date: dt.date) -> list[dict]:
     start = (target_date - dt.timedelta(days=DART_LOOKBACK_DAYS)).strftime("%Y%m%d")
     end = target_date.strftime("%Y%m%d")
-    df = dart.list(code, start=start, end=end)
+    try:
+        df = dart.list(code, start=start, end=end)
+    except Exception:
+        # 우선주/스팩/신주인수권 등은 DART 법인 코드가 보통주와 다르거나 아예 없어 조회가
+        # 실패할 수 있다. KRX 관행상 우선주 코드는 보통주 코드의 마지막 자리만 다른 경우가
+        # 많으므로, 마지막 자리를 "0"으로 바꾼 본주 후보 코드로 한 번 더 시도한다.
+        fallback_code = code[:-1] + "0" if len(code) == 6 and code[-1] != "0" else None
+        if not fallback_code or fallback_code == code:
+            raise
+        df = dart.list(fallback_code, start=start, end=end)
     if df is None or df.empty:
         return []
     df = df.sort_values("rcept_dt", ascending=False).head(DART_DISCLOSURES_PER_STOCK)
@@ -521,14 +544,16 @@ def collect_dart_disclosures(target_date: dt.date, stocks: Optional[dict] = None
 
     dart = OpenDartReader(api_key)
     result: dict = {}
-    errors: list[str] = []
     for code, name in stocks.items():
         try:
             result[code] = _fetch_dart_disclosures(dart, code, name, target_date)
         except Exception as exc:
+            # 개별 종목의 DART 조회 실패(우선주/스팩 등 법인코드 불일치, 일시 오류 등)는
+            # 흔하고 무해한 상황이라 사용자 화면(source_data_errors)에는 절대 노출하지
+            # 않는다. 서버 로그에만 남겨 운영자가 필요 시 확인할 수 있게 한다.
             result[code] = []
-            errors.append(f"[dart:{code}] {exc}")
-    return {"data": result, "errors": errors}
+            logger.warning("[dart:%s] 공시 조회 실패(사용자 화면에는 노출하지 않음): %s", code, exc)
+    return {"data": result, "errors": []}
 
 
 # ---------------------------------------------------------------------------

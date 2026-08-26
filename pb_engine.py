@@ -23,12 +23,17 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from collector import DateLike, _to_date, collect_market_data
+from collector import DateLike, MAJOR_STOCKS, US_STOCKS, _to_date, collect_market_data
 
 load_dotenv()
 
 OUTPUT_PATH_DEFAULT = "pb_report_latest.json"
 MAX_GENERATION_ATTEMPTS = 2
+
+# 추천 종목 개수는 collector의 종목 유니버스 크기와 항상 일치시킨다(유니버스 전체가
+# 분석·랭킹되어 프론트엔드 "더보기"로 전부 확인 가능하도록).
+DOMESTIC_RECOMMENDATION_COUNT = len(MAJOR_STOCKS)
+US_RECOMMENDATION_COUNT = len(US_STOCKS)
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
@@ -295,13 +300,13 @@ def build_user_prompt(context: dict) -> str:
    - institution_net_buy/foreign_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것 - 단기 지지/저항선(technical의 pivot_point 활용), 수급 유입이 기대되는 업종(뉴스의 affected_sectors 참고), 장중 대응전략을 구체적으로 제시할 것.
    - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수 또는 대표 종목의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
 2. news 항목 중 시장에 실질적 영향을 줄 만한 주요 뉴스를 골라 각각의 시장 파급 효과(Impact Analysis)를 해석할 것.
-3. technical.domestic/technical.us에는 초대형주부터 섹터별 중형 성장주까지 다양한 종목이 들어있다. 시가총액이나 지명도만으로 고르지 말고, 각 종목의 trend(이동평균 정배열 여부)·수급(institution_net_buy/foreign_net_buy가 있는 경우)·pivot_point 위치 등 객관적 지표를 비교해 국내 유망 종목 2개, 미국 유망 종목 2개를 선정할 것. 초대형 우량주 2개로만 채우지 말고 가능하면 서로 다른 섹터에서 고를 것 - 특정 종목이 유독 지표상 우월하다면 예외적으로 허용하되 그 경우 이유를 reason에 명확히 밝힐 것. 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
+3. technical.domestic에 있는 국내 종목 {DOMESTIC_RECOMMENDATION_COUNT}개 전부, technical.us에 있는 미국 종목 {US_RECOMMENDATION_COUNT}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목의 trend(이동평균 정배열/역배열 여부)·수급(institution_net_buy/foreign_net_buy가 있는 경우)·pivot_point 위치 등 객관적 지표에 근거해 종목별로 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것. 각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
    - buy_point에는 해당 종목의 pivot_point(지지/저항선)를 활용한 구체적 가격대를 포함할 것.
    - breakout_price에는 technical의 resistance_1(또는 prev_high) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
    - ticker 필드는 반드시 technical.domestic/technical.us의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "005930", "AAPL").
 4. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것.
 5. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
-6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic과 recommended_stocks.us는 각각 정확히 2개의 원소를 가질 것.
+6. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. recommended_stocks.domestic은 정확히 {DOMESTIC_RECOMMENDATION_COUNT}개, recommended_stocks.us는 정확히 {US_RECOMMENDATION_COUNT}개의 원소를 가질 것.
 
 [출력 JSON 스키마]
 {schema_str}
@@ -419,10 +424,11 @@ def validate_report_schema(report: dict) -> None:
         raise ValueError("market_overview.intraday_playbook이 비어있습니다.")
 
     stocks = report.get("recommended_stocks", {})
-    for key in ("domestic", "us"):
+    expected_counts = {"domestic": DOMESTIC_RECOMMENDATION_COUNT, "us": US_RECOMMENDATION_COUNT}
+    for key, expected_count in expected_counts.items():
         items = stocks.get(key)
-        if not isinstance(items, list) or len(items) != 2:
-            raise ValueError(f"recommended_stocks.{key}는 정확히 2개의 종목이어야 합니다.")
+        if not isinstance(items, list) or len(items) != expected_count:
+            raise ValueError(f"recommended_stocks.{key}는 정확히 {expected_count}개의 종목이어야 합니다.")
         for item in items:
             required_fields = {"name", "ticker", "reason", "buy_point", "risk", "breakout_price", "stop_loss_price"}
             if not required_fields.issubset(item):

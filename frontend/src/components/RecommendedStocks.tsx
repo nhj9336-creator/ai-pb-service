@@ -1,5 +1,10 @@
+"use client";
+
+import { useState } from "react";
 import type { SelectedStock, StockRecommendation } from "@/types/report";
 import { formatKrw, formatUsd } from "@/lib/format";
+
+const DEFAULT_VISIBLE_COUNT = 4;
 
 interface StockCardProps {
   market: "domestic" | "us";
@@ -53,6 +58,69 @@ function StockCard({ market, recommendation, isSelected, onSelect }: StockCardPr
   );
 }
 
+interface StockGroupProps {
+  title: string;
+  flag: string;
+  market: "domestic" | "us";
+  recommendations: StockRecommendation[];
+  selected: SelectedStock | null;
+  onSelect: (selection: SelectedStock) => void;
+}
+
+function StockGroup({ title, flag, market, recommendations, selected, onSelect }: StockGroupProps) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = recommendations.slice(0, DEFAULT_VISIBLE_COUNT);
+  const rest = recommendations.slice(DEFAULT_VISIBLE_COUNT);
+
+  return (
+    <div>
+      <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-muted">
+        <span>{flag}</span> {title}
+      </h3>
+      <div className="space-y-3">
+        {visible.map((rec) => (
+          <StockCard
+            key={rec.ticker}
+            market={market}
+            recommendation={rec}
+            isSelected={selected?.market === market && selected.ticker === rec.ticker}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+
+      {rest.length > 0 && (
+        <>
+          <div
+            className={`grid transition-[grid-template-rows] duration-300 ease-in-out ${
+              expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+            }`}
+          >
+            <div className="space-y-3 overflow-hidden pt-3">
+              {rest.map((rec) => (
+                <StockCard
+                  key={rec.ticker}
+                  market={market}
+                  recommendation={rec}
+                  isSelected={selected?.market === market && selected.ticker === rec.ticker}
+                  onSelect={onSelect}
+                />
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-3 w-full rounded-lg border border-dashed border-border py-2 text-xs font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent"
+          >
+            {expanded ? "접기" : `추천 종목 더보기 (전체 ${recommendations.length}개 보기)`}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 interface RecommendedStocksProps {
   domestic: StockRecommendation[];
   us: StockRecommendation[];
@@ -63,38 +131,22 @@ interface RecommendedStocksProps {
 export default function RecommendedStocks({ domestic, us, selected, onSelect }: RecommendedStocksProps) {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <div>
-        <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-muted">
-          <span>🇰🇷</span> 국내 유망 종목
-        </h3>
-        <div className="space-y-3">
-          {domestic.map((rec) => (
-            <StockCard
-              key={rec.ticker}
-              market="domestic"
-              recommendation={rec}
-              isSelected={selected?.market === "domestic" && selected.ticker === rec.ticker}
-              onSelect={onSelect}
-            />
-          ))}
-        </div>
-      </div>
-      <div>
-        <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-muted">
-          <span>🇺🇸</span> 미국 유망 종목
-        </h3>
-        <div className="space-y-3">
-          {us.map((rec) => (
-            <StockCard
-              key={rec.ticker}
-              market="us"
-              recommendation={rec}
-              isSelected={selected?.market === "us" && selected.ticker === rec.ticker}
-              onSelect={onSelect}
-            />
-          ))}
-        </div>
-      </div>
+      <StockGroup
+        title="국내 유망 종목"
+        flag="🇰🇷"
+        market="domestic"
+        recommendations={domestic}
+        selected={selected}
+        onSelect={onSelect}
+      />
+      <StockGroup
+        title="미국 유망 종목"
+        flag="🇺🇸"
+        market="us"
+        recommendations={us}
+        selected={selected}
+        onSelect={onSelect}
+      />
     </div>
   );
 }

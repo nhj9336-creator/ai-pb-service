@@ -37,8 +37,9 @@ export default function PortfolioAllocation({
 
   return (
     <SectionCard title="PB Portfolio & Asset Allocation" icon={<span>💰</span>}>
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-stretch">
+        {/* 좌측: 자산배분 도넛 차트 + 리밸런싱 전략 */}
+        <div className="flex flex-col">
           <div style={{ width: "100%", height: 260 }}>
             <ResponsiveContainer>
               <PieChart>
@@ -70,29 +71,36 @@ export default function PortfolioAllocation({
               </PieChart>
             </ResponsiveContainer>
           </div>
-          <ul className="mt-3 space-y-2">
-            {allocation.assets.map((a, idx) => (
-              <li key={a.name} className="rounded-lg border border-border/60 bg-surface-elevated p-2.5">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{ backgroundColor: PALETTE[idx % PALETTE.length] }}
-                  />
-                  <span className="text-sm font-semibold text-foreground">{a.name}</span>
-                  <span className="ml-auto text-sm font-semibold text-foreground">{a.percent}%</span>
-                </div>
-                <p className="mt-1 pl-5 text-xs text-muted">{a.representative_instruments}</p>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-3 rounded-lg border border-border/60 bg-surface-elevated p-3">
+          <div className="mt-3 flex-1 rounded-lg border border-border/60 bg-surface-elevated p-3">
             <p className="mb-1 text-xs font-semibold text-muted">리밸런싱 전략</p>
             <p className="text-sm leading-relaxed text-foreground/90">{allocation.rebalancing_strategy}</p>
           </div>
         </div>
-        <div>
-          <p className="mb-2 text-xs font-semibold text-muted">맞춤형 금융 상품</p>
-          <ProductList products={products} />
+
+        {/* 우측: 자산군별 세부 리스트 + 맞춤형 금융 상품 */}
+        <div className="flex flex-col gap-4">
+          <div>
+            <p className="mb-2 text-xs font-semibold text-muted">자산군별 비중 · 대표 상품</p>
+            <ul className="space-y-2">
+              {allocation.assets.map((a, idx) => (
+                <li key={a.name} className="rounded-lg border border-border/60 bg-surface-elevated p-2.5">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ backgroundColor: PALETTE[idx % PALETTE.length] }}
+                    />
+                    <span className="text-sm font-semibold text-foreground">{a.name}</span>
+                    <span className="ml-auto text-sm font-semibold text-foreground">{a.percent}%</span>
+                  </div>
+                  <p className="mt-1 pl-5 text-xs text-muted">{a.representative_instruments}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="flex-1">
+            <p className="mb-2 text-xs font-semibold text-muted">맞춤형 금융 상품</p>
+            <ProductList products={products} />
+          </div>
         </div>
       </div>
     </SectionCard>
