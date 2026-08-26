@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from typing import Any, Optional, Union
+import re
+import time
+from typing import Any, Callable, Optional, TypeVar, Union
 from urllib.parse import quote
 
 import feedparser
@@ -79,7 +81,13 @@ DART_LOOKBACK_DAYS = 7
 NEWS_ITEMS_PER_QUERY = 5
 FRED_LOOKBACK_OBS = 24
 
+# 외부 시세 API(yfinance/KRX) 호출 시 레이트리밋을 피하기 위한 지연 및 재시도 설정
+REQUEST_DELAY_SEC = 0.7
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SEC = 2.0
+
 DateLike = Union[str, dt.date, dt.datetime, None]
+_T = TypeVar("_T")
 
 
 # ---------------------------------------------------------------------------
@@ -96,16 +104,60 @@ def _to_date(target_date: DateLike) -> dt.date:
     return dt.datetime.strptime(target_date, "%Y-%m-%d").date()
 
 
+_NUMERIC_CLEAN_RE = re.compile(r"[^0-9.\-]")
+
+
 def _safe_num(value: Any, ndigits: int = 2) -> Optional[float]:
-    if value is None or pd.isna(value):
+    """숫자로 변환을 시도하고, 콤마/통화기호/손상된 문자열 등으로 실패하면 None을 반환한다.
+
+    KRX/yfinance가 드물게 비정상적인 문자열(예: "84,000원", 손상된 값)을 돌려주더라도
+    이 함수가 예외를 던지지 않으므로 호출부의 데이터 한 건이 통째로 유실되지 않는다.
+    """
+    if value is None:
         return None
-    return round(float(value), ndigits)
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        if isinstance(value, str):
+            cleaned = _NUMERIC_CLEAN_RE.sub("", value)
+            if cleaned in ("", "-", "."):
+                return None
+            value = cleaned
+        return round(float(value), ndigits)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_int(value: Any) -> Optional[int]:
-    if value is None or pd.isna(value):
-        return None
-    return int(value)
+    num = _safe_num(value, ndigits=0)
+    return int(num) if num is not None else None
+
+
+def _clean_numeric_column(series: "pd.Series") -> "pd.Series":
+    """OHLCV 컬럼에 섞여 들어온 비정상 문자열을 정리해 숫자로 변환한다.
+
+    끝내 변환 불가능한 값은 NaN으로 남기고(행 삭제는 호출부에서 판단), 정상 숫자
+    컬럼(int64/float64)에 적용해도 안전하다.
+    """
+    cleaned = series.astype(str).str.replace(_NUMERIC_CLEAN_RE, "", regex=True)
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _retry_with_backoff(fn: Callable[[], _T], *, context: str = "") -> _T:
+    """일시적 오류(레이트리밋 등)에 대해 지수 백오프로 최대 RETRY_MAX_ATTEMPTS회 재시도한다."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - 마지막 시도 실패 시 위로 그대로 전파
+            last_exc = exc
+            if attempt < RETRY_MAX_ATTEMPTS:
+                time.sleep(RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)))
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +167,11 @@ def _safe_int(value: Any) -> Optional[int]:
 def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
     start = target_date - dt.timedelta(days=20)
     end = target_date + dt.timedelta(days=1)
-    hist = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat(), interval="1d")
+
+    def _fetch() -> pd.DataFrame:
+        return yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat(), interval="1d")
+
+    hist = _retry_with_backoff(_fetch, context=f"index:{ticker}")
     if hist.empty:
         raise ValueError(f"{ticker}: 조회 구간에 데이터가 없습니다.")
     hist = hist[hist.index.date <= target_date]
@@ -124,13 +180,13 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
 
     last = hist.iloc[-1]
     prev = hist.iloc[-2] if len(hist) >= 2 else None
-    change = float(last["Close"] - prev["Close"]) if prev is not None else None
-    change_pct = (
-        change / float(prev["Close"]) * 100 if prev is not None and prev["Close"] else None
-    )
+    last_close = _safe_num(last["Close"])
+    prev_close = _safe_num(prev["Close"]) if prev is not None else None
+    change = (last_close - prev_close) if (last_close is not None and prev_close is not None) else None
+    change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
     return {
         "date": hist.index[-1].date().isoformat(),
-        "close": _safe_num(last["Close"]),
+        "close": last_close,
         "change": _safe_num(change),
         "change_pct": _safe_num(change_pct),
         "volume": _safe_int(last.get("Volume")),
@@ -163,14 +219,18 @@ def collect_index_and_flow_data(target_date: dt.date) -> dict:
     result: dict = {}
     errors: list[str] = []
 
-    for name, ticker in GLOBAL_INDEX_TICKERS.items():
+    for idx, (name, ticker) in enumerate(GLOBAL_INDEX_TICKERS.items()):
+        if idx > 0:
+            time.sleep(REQUEST_DELAY_SEC)
         try:
             result[name] = _fetch_yf_index_snapshot(ticker, target_date)
         except Exception as exc:
             result[name] = None
             errors.append(f"[index:{name}] {exc}")
 
-    for name, market in KRX_SUPPLY_DEMAND_MARKETS.items():
+    for idx, (name, market) in enumerate(KRX_SUPPLY_DEMAND_MARKETS.items()):
+        if idx > 0:
+            time.sleep(REQUEST_DELAY_SEC)
         if result.get(name) is None:
             continue
         try:
@@ -188,7 +248,10 @@ def collect_index_and_flow_data(target_date: dt.date) -> dict:
 
 def _compute_pivot_levels(df: pd.DataFrame) -> dict:
     last = df.iloc[-1]
-    high, low, close = float(last["고가"]), float(last["저가"]), float(last["종가"])
+    high, low, close = _safe_num(last["고가"]), _safe_num(last["저가"]), _safe_num(last["종가"])
+    if high is None or low is None or close is None:
+        return {"pivot": None, "resistance_1": None, "resistance_2": None, "support_1": None, "support_2": None}
+
     pivot = (high + low + close) / 3
     r1, s1 = 2 * pivot - low, 2 * pivot - high
     r2, s2 = pivot + (high - low), pivot - (high - low)
@@ -215,6 +278,15 @@ def _compute_support_resistance(df: pd.DataFrame) -> dict:
 def _build_technical_payload(df: pd.DataFrame, name: str) -> dict:
     """시가/고가/저가/종가/거래량(한글 컬럼) DataFrame으로부터 차트용 페이로드를 만든다."""
     df = df.tail(OHLCV_LOOKBACK_DAYS).copy()
+
+    # KRX/yfinance가 드물게 손상된 문자열 값을 섞어 보내는 경우를 대비해 숫자 컬럼을 정리한다.
+    # 정리 후에도 시가/고가/저가/종가가 유효하지 않은 행은 제외한다(거래량은 부가 정보라 유지).
+    for col in ("시가", "고가", "저가", "종가", "거래량"):
+        df[col] = _clean_numeric_column(df[col])
+    df = df.dropna(subset=["시가", "고가", "저가", "종가"])
+    if df.empty:
+        raise ValueError(f"{name}: 유효한 OHLCV 데이터가 없습니다(전량 파싱 실패).")
+
     for w in MA_WINDOWS:
         df[f"MA{w}"] = df["종가"].rolling(window=w, min_periods=1).mean()
 
@@ -239,7 +311,10 @@ def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
     # 영업일 기준 120일을 확보하기 위해 달력일 기준 넉넉히 조회 후 tail로 자른다.
     start_str = (target_date - dt.timedelta(days=int(OHLCV_LOOKBACK_DAYS * 2.2))).strftime("%Y%m%d")
 
-    df = krx.get_market_ohlcv_by_date(start_str, end_str, code)
+    def _fetch() -> pd.DataFrame:
+        return krx.get_market_ohlcv_by_date(start_str, end_str, code)
+
+    df = _retry_with_backoff(_fetch, context=f"technical:{code}")
     if df is None or df.empty:
         raise ValueError(f"{code}({name}): OHLCV 데이터를 찾을 수 없습니다.")
 
@@ -250,7 +325,10 @@ def _fetch_us_stock_technical(ticker: str, name: str, target_date: dt.date) -> d
     start = target_date - dt.timedelta(days=int(OHLCV_LOOKBACK_DAYS * 2.2))
     end = target_date + dt.timedelta(days=1)
 
-    hist = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat(), interval="1d")
+    def _fetch() -> pd.DataFrame:
+        return yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat(), interval="1d")
+
+    hist = _retry_with_backoff(_fetch, context=f"technical_us:{ticker}")
     if hist.empty:
         raise ValueError(f"{ticker}({name}): OHLCV 데이터를 찾을 수 없습니다.")
     hist = hist[hist.index.date <= target_date]
@@ -266,7 +344,9 @@ def collect_technical_data(target_date: dt.date, stocks: Optional[dict] = None) 
     stocks = stocks or MAJOR_STOCKS
     result: dict = {}
     errors: list[str] = []
-    for code, name in stocks.items():
+    for idx, (code, name) in enumerate(stocks.items()):
+        if idx > 0:
+            time.sleep(REQUEST_DELAY_SEC)
         try:
             result[code] = _fetch_stock_technical(code, name, target_date)
         except Exception as exc:
@@ -280,7 +360,9 @@ def collect_us_technical_data(target_date: dt.date, stocks: Optional[dict] = Non
     stocks = stocks or US_STOCKS
     result: dict = {}
     errors: list[str] = []
-    for ticker, name in stocks.items():
+    for idx, (ticker, name) in enumerate(stocks.items()):
+        if idx > 0:
+            time.sleep(REQUEST_DELAY_SEC)
         try:
             result[ticker] = _fetch_us_stock_technical(ticker, name, target_date)
         except Exception as exc:
