@@ -101,7 +101,11 @@ export default function Home() {
         </details>
       )}
 
-      {initialLoading && <p className="text-sm text-muted">리포트를 불러오는 중...</p>}
+      {initialLoading && (
+        <p className="text-sm text-muted">
+          리포트를 불러오는 중... (백엔드가 잠들어 있었다면 깨어나는 데 최대 1분 정도 걸릴 수 있습니다)
+        </p>
+      )}
 
       {report && (
         <>
