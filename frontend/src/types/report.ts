@@ -119,11 +119,19 @@ export interface NewsImpactAnalysis {
   affected_sectors: string[];
 }
 
+export type EntrySignal = "진입유효" | "눌림목대기" | "고점매수주의" | "진입보류";
+
 export interface StockRecommendation {
   name: string;
   ticker: string;
   reason: string;
   buy_point: string;
+  /** 권장 진입 범위(하단/상단). 판단 근거 부족 시 둘 다 null. */
+  entry_price_low: number | null;
+  entry_price_high: number | null;
+  entry_signal: EntrySignal;
+  /** entry_signal 판정 근거 1문장(시장 총평 스탠스와의 정합성 포함). */
+  entry_signal_reason: string;
   breakout_price: number | null;
   stop_loss_price: number | null;
   risk: string;

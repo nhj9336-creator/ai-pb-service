@@ -13,6 +13,7 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
+import EntrySignalBadge from "./EntrySignalBadge";
 import type { SelectedStock, TechnicalStock } from "@/types/report";
 import { formatKrw, formatNumber, formatUsd } from "@/lib/format";
 
@@ -454,6 +455,7 @@ export default function StockChart({ selection, stock }: StockChartProps) {
               실시간
             </span>
           )}
+          <EntrySignalBadge signal={selection.recommendation.entry_signal} className="ml-2" />
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-muted">
           {MA_LINES.map((ma) => (
@@ -535,12 +537,19 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
         <p className="mb-1 text-xs font-semibold text-accent">PB 대응 노트</p>
         <p className="text-sm leading-relaxed text-foreground/90">{buildTechnicalNote(stock)}</p>
-        <div className="mt-3">
-          <p className="mb-1 text-xs font-semibold text-foreground/70">매수 관전 포인트</p>
-          <p className="text-sm leading-relaxed text-muted">{selection.recommendation.buy_point}</p>
-        </div>
-        {(selection.recommendation.breakout_price !== null || selection.recommendation.stop_loss_price !== null) && (
+
+        {(selection.recommendation.entry_price_low !== null ||
+          selection.recommendation.entry_price_high !== null ||
+          selection.recommendation.breakout_price !== null ||
+          selection.recommendation.stop_loss_price !== null) && (
           <div className="mt-2 flex flex-wrap gap-2">
+            {(selection.recommendation.entry_price_low !== null ||
+              selection.recommendation.entry_price_high !== null) && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent">
+                ◎ 진입 범위 {formatPrice(selection.recommendation.entry_price_low)} ~{" "}
+                {formatPrice(selection.recommendation.entry_price_high)}
+              </span>
+            )}
             {selection.recommendation.breakout_price !== null && (
               <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-400">
                 ▲ 돌파 대응 {formatPrice(selection.recommendation.breakout_price)}
@@ -553,6 +562,15 @@ export default function StockChart({ selection, stock }: StockChartProps) {
             )}
           </div>
         )}
+
+        <div className="mt-3">
+          <p className="mb-1 text-xs font-semibold text-foreground/70">진입 시그널 근거</p>
+          <p className="text-sm leading-relaxed text-muted">{selection.recommendation.entry_signal_reason}</p>
+        </div>
+        <div className="mt-3">
+          <p className="mb-1 text-xs font-semibold text-foreground/70">매수 관전 포인트</p>
+          <p className="text-sm leading-relaxed text-muted">{selection.recommendation.buy_point}</p>
+        </div>
       </div>
 
       {showMethodology && <MethodologyModal onClose={() => setShowMethodology(false)} />}

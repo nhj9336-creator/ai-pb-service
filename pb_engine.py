@@ -54,6 +54,7 @@ DISCLAIMER_TEXT = "본 리포트는 참고용 정보이며, 투자 판단과 그
 
 VALID_STRATEGY_OPINIONS = {"매수", "관망", "비중축소"}
 VALID_SUPPLY_DEMAND_STATUS = {"매집", "이탈", "혼조", "데이터없음"}
+VALID_ENTRY_SIGNALS = {"진입유효", "눌림목대기", "고점매수주의", "진입보류"}
 
 TASK_A_SCHEMA = {
     "market_overview": {
@@ -97,6 +98,10 @@ def _stock_item_schema(ticker_example: str) -> dict:
         "ticker": f"종목코드/티커(예: {ticker_example})",
         "reason": "추천 이유",
         "buy_point": "매수 관전 포인트(최소 3~4문장의 상세 PB 대응 노트)",
+        "entry_price_low": "권장 진입 범위 하단(숫자). 판단 불가 시 null",
+        "entry_price_high": "권장 진입 범위 상단(숫자). 판단 불가 시 null",
+        "entry_signal": "진입유효 | 눌림목대기 | 고점매수주의 | 진입보류 중 하나",
+        "entry_signal_reason": "진입 시그널 판정 근거 1문장(시장 총평 스탠스와의 정합성 포함)",
         "breakout_price": "상승 돌파 시 대응 기준가(숫자). 판단 불가 시 null",
         "stop_loss_price": "지지선 이탈 시 손절 기준가(숫자). 판단 불가 시 null",
         "risk": "투자 리스크",
@@ -348,6 +353,10 @@ def _build_stock_task_prompt(
         else ""
     )
     return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 종목별 기술적 지표 데이터입니다.
+market_stance는 이미 확정된 이번 리포트의 시장 총평 결론이다 - 아래 entry_signal 판정은 반드시 이 결론과 모순되지 않아야 한다([매우 중요] 규칙 참고).
+
+[시장 총평 결론(market_stance) - 이미 확정됨, 재해석하지 말고 그대로 전제할 것]
+{json.dumps(context.get("market_stance", {}), ensure_ascii=False, indent=2)}
 
 [기술적 지표 데이터]
 {context_str}
@@ -364,6 +373,13 @@ def _build_stock_task_prompt(
      (2) 모멘텀·매크로 근거(1~2문장): {dart_note}news/macro 중 이 종목·업종과 명백히 관련된 항목이 있으면 함께 짚을 것(실적 발표, 산업 이슈, 금리·거시 이벤트, 지정학적 이슈 등). 관련된 사실이 데이터에 전혀 없으면 이 문장은 생략하고 (1)만으로 구성할 것 - 근거 없는 이유를 지어내지 말 것.
      감정적 수식어("기대된다", "유망하다") 없이 수치와 사실 근거로만 서술할 것.
    - breakout_price에는 technical의 resistance_1(또는 prev_high, 저항 추세선 근접값) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low, 지지 추세선 근접값) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
+   - entry_price_low/entry_price_high에는 pivot_point의 지지선(S1)이나 최근 눌림목 가격대 등 데이터에 근거한 "권장 진입 범위"를 실제 숫자로 제시할 것(현재가가 이미 그 범위 안이면 현재가 부근으로 좁게 설정 가능). 근거가 부족하면 둘 다 null로 둘 것.
+   - entry_signal은 진입유효/눌림목대기/고점매수주의/진입보류 중 하나로 판정하고, entry_signal_reason에 1문장으로 근거를 밝힐 것:
+     · 진입유효: 현재가(또는 current_price)가 entry_price 범위 안에 있고 추세/거래량 지표가 우호적일 때.
+     · 눌림목대기: 추세는 우호적이나 현재가가 저항권에 가까워 조정을 기다려야 할 때.
+     · 고점매수주의: 단기 급등·거래량 없는 돌파 등으로 추격 매수 위험이 클 때.
+     · 진입보류: 기술적 지표가 불리할 때, 또는 아래 [매우 중요] 규칙에 해당할 때.
+   - [매우 중요·시장 총평과의 정합성] market_stance.pb_strategy_opinion이 "비중축소"이면, 개별 종목의 차트가 아무리 좋아도 entry_signal을 "진입유효"로 판정하지 말 것 - 반드시 "눌림목대기" 또는 "진입보류" 중 하나를 선택하고, entry_signal_reason에 시장 총평이 비중축소 국면이라는 점을 명시적으로 언급할 것. pb_strategy_opinion이 "관망"이면 "진입유효"는 예외적으로 강한 기술적 근거가 있는 경우에만 신중하게 사용할 것. pb_strategy_opinion이 "매수"이면 종목별 지표에 따라 자유롭게 판정할 것.
    - ticker 필드는 반드시 technical.{market_key}의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "{ticker_example}").
 2. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. 정확히 {count}개의 원소를 가질 것.
 
@@ -596,10 +612,24 @@ def _validate_task_a(data: dict) -> None:
 def _validate_stock_items(items: Any, expected_count: int, label: str) -> None:
     if not isinstance(items, list) or len(items) != expected_count:
         raise ValueError(f"{label}는 정확히 {expected_count}개의 종목이어야 합니다.")
-    required_fields = {"name", "ticker", "reason", "buy_point", "risk", "breakout_price", "stop_loss_price"}
+    required_fields = {
+        "name",
+        "ticker",
+        "reason",
+        "buy_point",
+        "risk",
+        "entry_price_low",
+        "entry_price_high",
+        "entry_signal",
+        "entry_signal_reason",
+        "breakout_price",
+        "stop_loss_price",
+    }
     for item in items:
         if not required_fields.issubset(item):
             raise ValueError(f"{label} 항목에 누락된 필드가 있습니다: {item}")
+        if item.get("entry_signal") not in VALID_ENTRY_SIGNALS:
+            raise ValueError(f"{label} 항목의 entry_signal 값이 올바르지 않습니다: {item.get('entry_signal')!r}")
 
 
 def _validate_task_b(data: dict) -> None:
@@ -627,16 +657,9 @@ def save_report(report: dict, output_path: str = OUTPUT_PATH_DEFAULT) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 6. 종합 엔트리포인트 - Task A/B/C/D를 asyncio.gather로 동시 호출
+# 6. 종합 엔트리포인트 - Task A/D를 먼저 동시 호출해 시장 총평을 확정한 뒤,
+#    그 결론(market_stance)을 받아 Task B/C(종목별 entry_signal)를 동시 호출한다.
 # ---------------------------------------------------------------------------
-
-# (task_name, 프롬프트 빌더, 검증기) - asyncio.gather 순서와 결과 언패킹 순서를 일치시킨다.
-_TASK_SPECS: list[tuple[str, Callable[[dict], str], Callable[[dict], None]]] = [
-    ("A", _build_task_a_prompt, _validate_task_a),
-    ("B", _build_task_b_prompt, _validate_task_b),
-    ("C", _build_task_c_prompt, _validate_task_c),
-    ("D", _build_task_d_prompt, _validate_task_d),
-]
 
 
 async def _generate_task(
@@ -667,8 +690,14 @@ async def generate_pb_report_async(
     output_path: str = OUTPUT_PATH_DEFAULT,
     market_data: Optional[dict] = None,
 ) -> dict:
-    """시장 데이터를 수집(또는 재사용)하고, 4개 독립 태스크(시장총평·자산배분 / 국내종목 /
-    미국종목 / 뉴스)를 asyncio.gather로 동시 호출해 Senior PB 리포트를 생성, 저장한다.
+    """시장 데이터를 수집(또는 재사용)하고 Senior PB 리포트를 생성, 저장한다.
+
+    Task A(시장총평·자산배분)와 Task D(뉴스)를 먼저 동시 호출해 시장 총평 결론을 확정한 뒤,
+    그 결론(market_stance)을 Task B(국내종목)/Task C(미국종목)에 전달해 동시 호출한다.
+    종목별 entry_signal이 시장 총평의 pb_strategy_opinion과 모순되지 않게 하려면(예: 비중축소
+    국면인데 개별 종목만 "진입유효") B/C가 A의 실제 결론을 알아야 하므로, 4개 태스크를 전부
+    동시에 실행할 수는 없다 - 대신 뉴스(D)는 시장 스탠스와 무관하므로 A와 묶어 병렬로 돌려
+    지연을 최소화한다.
 
     Args:
         target_date: 리포트 기준일. None이면 오늘.
@@ -684,52 +713,81 @@ async def generate_pb_report_async(
     market_data = market_data or await asyncio.to_thread(collect_market_data, resolved_date)
     full_context = build_prompt_context(market_data)
 
-    task_contexts = {
-        "A": {
-            k: full_context[k]
-            for k in ("target_date", "analysis_timestamp", "data_freshness", "data_freshness_label", "indices", "macro")
-        },
-        "B": {
-            "target_date": full_context["target_date"],
-            "analysis_timestamp": full_context["analysis_timestamp"],
-            "data_freshness_label": full_context["data_freshness_label"],
-            "technical": {"domestic": full_context["technical"]["domestic"]},
-            # 매수 관전포인트에 모멘텀/매크로 근거(실적 공시, 관련 뉴스, 금리 등)를 사실에
-            # 근거해 덧붙일 수 있도록 국내 종목 유니버스에 해당하는 공시만 추려 전달한다.
-            "dart_disclosures": {
-                code: v
-                for code, v in full_context["dart_disclosures"].items()
-                if code in full_context["technical"]["domestic"]
-            },
-            "macro": full_context["macro"],
-            "news": full_context["news"],
-        },
-        "C": {
-            "target_date": full_context["target_date"],
-            "analysis_timestamp": full_context["analysis_timestamp"],
-            "data_freshness_label": full_context["data_freshness_label"],
-            "technical": {"us": full_context["technical"]["us"]},
-            # DART는 국내 전자공시 시스템이라 미국 종목에는 해당 데이터가 없으므로 dart_disclosures는
-            # 전달하지 않는다(has_dart=False와 짝을 맞춤).
-            "macro": full_context["macro"],
-            "news": full_context["news"],
-        },
-        "D": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "news")},
+    context_a = {
+        k: full_context[k]
+        for k in ("target_date", "analysis_timestamp", "data_freshness", "data_freshness_label", "indices", "macro")
     }
+    context_d = {k: full_context[k] for k in ("target_date", "analysis_timestamp", "news")}
 
-    results = await asyncio.gather(
-        *(
-            _generate_task(name, task_contexts[name], build_prompt, validator, provider)
-            for name, build_prompt, validator in _TASK_SPECS
-        ),
+    # 1단계: 시장총평(A)+뉴스(D) 동시 실행 - B/C는 A의 결론이 나와야 시작할 수 있다.
+    phase1 = await asyncio.gather(
+        _generate_task("A", context_a, _build_task_a_prompt, _validate_task_a, provider),
+        _generate_task("D", context_d, _build_task_d_prompt, _validate_task_d, provider),
         return_exceptions=True,
     )
+    phase1_errors = [r for r in phase1 if isinstance(r, Exception)]
+    if phase1_errors:
+        raise RuntimeError(
+            f"PB 리포트 생성 중 {len(phase1_errors)}개 태스크가 실패했습니다: {phase1_errors[0]}"
+        ) from phase1_errors[0]
+    task_a, task_d = phase1
 
-    errors = [r for r in results if isinstance(r, Exception)]
-    if errors:
-        raise RuntimeError(f"PB 리포트 생성 중 {len(errors)}개 태스크가 실패했습니다: {errors[0]}") from errors[0]
+    # A가 확정한 시장 총평 결론을 B/C에 "이미 확정된 전제"로 전달한다(재해석 금지 - 프롬프트에서 강제).
+    market_stance = {
+        "pb_strategy_opinion": task_a["market_overview"]["pb_strategy_opinion"],
+        "strategy_rationale": task_a["market_overview"]["strategy_rationale"],
+    }
 
-    task_a, task_b, task_c, task_d = results
+    context_b = {
+        "target_date": full_context["target_date"],
+        "analysis_timestamp": full_context["analysis_timestamp"],
+        "data_freshness_label": full_context["data_freshness_label"],
+        "market_stance": market_stance,
+        "technical": {"domestic": full_context["technical"]["domestic"]},
+        # 매수 관전포인트에 모멘텀/매크로 근거(실적 공시, 관련 뉴스, 금리 등)를 사실에
+        # 근거해 덧붙일 수 있도록 국내 종목 유니버스에 해당하는 공시만 추려 전달한다.
+        "dart_disclosures": {
+            code: v
+            for code, v in full_context["dart_disclosures"].items()
+            if code in full_context["technical"]["domestic"]
+        },
+        "macro": full_context["macro"],
+        "news": full_context["news"],
+    }
+    context_c = {
+        "target_date": full_context["target_date"],
+        "analysis_timestamp": full_context["analysis_timestamp"],
+        "data_freshness_label": full_context["data_freshness_label"],
+        "market_stance": market_stance,
+        "technical": {"us": full_context["technical"]["us"]},
+        # DART는 국내 전자공시 시스템이라 미국 종목에는 해당 데이터가 없으므로 dart_disclosures는
+        # 전달하지 않는다(has_dart=False와 짝을 맞춤).
+        "macro": full_context["macro"],
+        "news": full_context["news"],
+    }
+
+    # 2단계: 국내(B)/미국(C) 종목 태스크 동시 실행.
+    phase2 = await asyncio.gather(
+        _generate_task("B", context_b, _build_task_b_prompt, _validate_task_b, provider),
+        _generate_task("C", context_c, _build_task_c_prompt, _validate_task_c, provider),
+        return_exceptions=True,
+    )
+    phase2_errors = [r for r in phase2 if isinstance(r, Exception)]
+    if phase2_errors:
+        raise RuntimeError(
+            f"PB 리포트 생성 중 {len(phase2_errors)}개 태스크가 실패했습니다: {phase2_errors[0]}"
+        ) from phase2_errors[0]
+    task_b, task_c = phase2
+
+    # 결정론적 안전장치: 비중축소 국면에서는 개별 종목의 진입유효 시그널을 코드 레벨에서
+    # 강제로 하향 조정해, LLM이 프롬프트 지시를 놓치더라도 시장 총평과의 모순을 원천 차단한다.
+    if market_stance["pb_strategy_opinion"] == "비중축소":
+        for stock in [*task_b["domestic"], *task_c["us"]]:
+            if stock.get("entry_signal") == "진입유효":
+                stock["entry_signal"] = "진입보류"
+                stock["entry_signal_reason"] = (
+                    "시장 총평이 비중축소 국면으로 판단되어, 개별 기술적 신호와 무관하게 신규 진입을 보류합니다."
+                )
 
     report_body = {
         "market_overview": task_a["market_overview"],

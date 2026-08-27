@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import EntrySignalBadge from "./EntrySignalBadge";
 import type { SelectedStock, StockRecommendation } from "@/types/report";
 import { formatKrw, formatUsd } from "@/lib/format";
 
@@ -25,14 +26,25 @@ function StockCard({ market, recommendation, isSelected, onSelect }: StockCardPr
           : "border-border bg-surface-elevated hover:border-accent/50"
       }`}
     >
-      <div className="flex items-baseline justify-between">
-        <span className="text-sm font-semibold text-foreground">{recommendation.name}</span>
-        <span className="text-xs text-muted">{recommendation.ticker}</span>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <span className="text-sm font-semibold text-foreground">{recommendation.name}</span>
+          <span className="ml-1.5 text-xs text-muted">{recommendation.ticker}</span>
+        </div>
+        <EntrySignalBadge signal={recommendation.entry_signal} />
       </div>
       <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-foreground/80">{recommendation.reason}</p>
 
-      {(recommendation.breakout_price !== null || recommendation.stop_loss_price !== null) && (
+      {(recommendation.entry_price_low !== null ||
+        recommendation.entry_price_high !== null ||
+        recommendation.breakout_price !== null ||
+        recommendation.stop_loss_price !== null) && (
         <div className="mt-3 flex flex-wrap gap-2">
+          {(recommendation.entry_price_low !== null || recommendation.entry_price_high !== null) && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent">
+              ◎ 진입 범위 {formatPrice(recommendation.entry_price_low)} ~ {formatPrice(recommendation.entry_price_high)}
+            </span>
+          )}
           {recommendation.breakout_price !== null && (
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-400">
               ▲ 돌파 대응 {formatPrice(recommendation.breakout_price)}
@@ -47,6 +59,10 @@ function StockCard({ market, recommendation, isSelected, onSelect }: StockCardPr
       )}
 
       <div className="mt-3 space-y-2.5">
+        <div>
+          <p className="mb-1 text-xs font-semibold text-foreground/70">진입 시그널 근거</p>
+          <p className="text-[13px] leading-relaxed text-muted">{recommendation.entry_signal_reason}</p>
+        </div>
         <div>
           <p className="mb-1 text-xs font-semibold text-foreground/70">매수 관전 포인트</p>
           <p className="text-[13px] leading-relaxed text-muted">{recommendation.buy_point}</p>
