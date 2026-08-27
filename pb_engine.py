@@ -24,7 +24,17 @@ from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
-from collector import DateLike, MAJOR_STOCKS, US_STOCKS, _now_kst, _to_date, collect_market_data
+from collector import (
+    DateLike,
+    MAJOR_STOCKS,
+    US_STOCKS,
+    _fetch_stock_technical,
+    _fetch_us_stock_technical,
+    _now_kst,
+    _to_date,
+    collect_market_data,
+    resolve_domestic_ticker,
+)
 
 load_dotenv()
 
@@ -119,6 +129,29 @@ TASK_D_SCHEMA = {
             "affected_sectors": ["영향받는 섹터/업종 목록"],
         }
     ]
+}
+
+# 보유 종목 맞춤 진단(부가 기능) - 메인 4-태스크 파이프라인과 독립적으로, 사용자가 요청할
+# 때만 단발성으로 호출된다.
+VALID_RISK_LEVELS = {"낮음", "보통", "높음"}
+
+
+def _strategy_schema() -> dict:
+    return {
+        "action": "해당 투자 호흡에 맞는 구체적 대응(추가매수/손절/익절 가격을 실제 숫자로 포함) 2~3문장",
+        "risk_level": "낮음 | 보통 | 높음 중 하나",
+        "risk_reward_note": "손절폭 대비 목표 상승폭 등 위험 대비 기대수익을 정성적으로 설명(승률 등 지어낸 통계 수치 금지)",
+    }
+
+
+TASK_DIAGNOSIS_SCHEMA = {
+    "profit_diagnosis": "평가손익(pnl_amount/pnl_pct)과 평단가가 기술적 지표 대비 어느 위치에 있는지 진단하는 3~4문장",
+    "strategies": {
+        "day_trading": _strategy_schema(),
+        "swing": _strategy_schema(),
+        "long_term": _strategy_schema(),
+    },
+    "market_consistency_note": "전체 시장 총평 스탠스와 이 진단이 어떻게 연결되는지 1~2문장",
 }
 
 
@@ -421,6 +454,29 @@ def _build_task_d_prompt(context: dict) -> str:
 """
 
 
+def _build_diagnosis_prompt(context: dict) -> str:
+    """보유 종목 맞춤 진단(부가 기능) 프롬프트."""
+    schema_str = json.dumps(TASK_DIAGNOSIS_SCHEMA, ensure_ascii=False, indent=2)
+    context_str = json.dumps(context, ensure_ascii=False, indent=2)
+    return f"""아래는 고객이 보유 중인 종목 1개에 대한 진단 요청 데이터입니다. {context.get('target_date')} 기준, {context.get('analysis_timestamp')}에 수집됐습니다.
+
+[보유 종목 및 시장 데이터]
+{context_str}
+
+[작성 요구사항]
+1. profit_diagnosis: pnl_amount/pnl_pct는 이미 정확히 계산되어 주어졌으니 재계산하지 말고 그대로 인용할 것. 이를 근거로 현재 평가손익을 진단하고, avg_price(평단가)가 technical의 pivot_point(P/R1/S1)나 이동평균 대비 어느 위치에 있는지 기술적으로 해석할 것(3~4문장). current_price_is_realtime이 true이면 장중 실시간 시세 기준임을 밝힐 것.
+2. strategies.day_trading(단타: 당일~수일)/swing(스윙: 수주~수개월)/long_term(장기: 수개월 이상) 각각에 대해:
+   - action: 해당 투자 호흡에 맞는 구체적 대응을 pivot_point/trend_channel/volume_momentum 등 실제 수치를 근거로 제시할 것(추가매수/손절/익절 가격을 실제 숫자로 포함). 평단가(avg_price) 대비 현재 손익 상황도 함께 고려할 것.
+   - risk_level: 낮음/보통/높음 중 하나.
+   - risk_reward_note: 손절폭 대비 목표 상승폭 비율 등 위험 대비 기대수익을 정성적으로 설명할 것. "승률 OO%"처럼 실제 백테스트 없이 지어낸 통계 수치는 절대 쓰지 말 것.
+3. market_consistency_note: market_stance가 null이 아니면 그 pb_strategy_opinion(매수/관망/비중축소)과 이 진단이 어떻게 연결되는지 명시할 것(예: 시장이 비중축소 국면이면 세 전략 모두 신규 추가매수보다 손절/비중축소 관점을 우선 고려하도록 서술). market_stance가 null이면 "최신 시장 총평 데이터가 없어 이 종목 자체의 기술적 지표만으로 진단했다"는 취지를 밝힐 것.
+4. 감정적 수식어("기대된다", "유망하다") 없이 수치와 사실 근거로만 서술할 것. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것.
+
+[출력 JSON 스키마]
+{schema_str}
+"""
+
+
 # ---------------------------------------------------------------------------
 # 3. LLM 호출 (OpenAI / Gemini)
 # ---------------------------------------------------------------------------
@@ -646,6 +702,26 @@ def _validate_task_d(data: dict) -> None:
         raise ValueError(f"news_impact_analysis는 정확히 {NEWS_IMPACT_COUNT}개여야 합니다.")
 
 
+def _validate_diagnosis(data: dict) -> None:
+    if not data.get("profit_diagnosis"):
+        raise ValueError("profit_diagnosis가 비어있습니다.")
+    strategies = data.get("strategies")
+    if not isinstance(strategies, dict):
+        raise ValueError("strategies가 없습니다.")
+    for key in ("day_trading", "swing", "long_term"):
+        item = strategies.get(key)
+        if not isinstance(item, dict):
+            raise ValueError(f"strategies.{key}가 없습니다.")
+        if not item.get("action"):
+            raise ValueError(f"strategies.{key}.action이 비어있습니다.")
+        if item.get("risk_level") not in VALID_RISK_LEVELS:
+            raise ValueError(f"strategies.{key}.risk_level 값이 올바르지 않습니다: {item.get('risk_level')!r}")
+        if not item.get("risk_reward_note"):
+            raise ValueError(f"strategies.{key}.risk_reward_note가 비어있습니다.")
+    if not data.get("market_consistency_note"):
+        raise ValueError("market_consistency_note가 비어있습니다.")
+
+
 # ---------------------------------------------------------------------------
 # 5. 저장
 # ---------------------------------------------------------------------------
@@ -839,6 +915,127 @@ def generate_pb_report(
             market_data=market_data,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. 보유 종목 맞춤 진단 (부가 기능) - 메인 4-태스크 파이프라인과 독립적으로,
+#    사용자가 인터랙티브 차트 하단 폼에서 요청할 때만 단발성으로 호출된다.
+# ---------------------------------------------------------------------------
+
+def _load_latest_market_stance() -> Optional[dict]:
+    """가장 최근 저장된 리포트의 시장 총평 스탠스를 읽어온다(진단 프롬프트의 시장 정합성
+    근거용). 저장된 리포트가 없거나 읽기에 실패하면 None을 반환한다 - 이 경우 프롬프트가
+    스탠스 정보 없이 종목 자체의 기술적 지표만으로 진단하도록 안내한다."""
+    try:
+        with open(OUTPUT_PATH_DEFAULT, "r", encoding="utf-8") as f:
+            report = json.load(f)
+        overview = report.get("market_overview") or {}
+        opinion = overview.get("pb_strategy_opinion")
+        if not opinion:
+            return None
+        return {
+            "pb_strategy_opinion": opinion,
+            "strategy_rationale": overview.get("strategy_rationale"),
+        }
+    except Exception:
+        return None
+
+
+async def diagnose_stock_holding(
+    query: str,
+    market: str,
+    quantity: float,
+    avg_price: float,
+    target_date: DateLike = None,
+    provider: Optional[str] = None,
+) -> dict:
+    """사용자가 입력한 보유 종목 1개에 대해 실시간 기술적 지표를 조회하고, 평가손익을
+    코드에서 정확히 계산한 뒤(LLM이 산술을 틀리지 않도록), 최신 시장 총평 스탠스와
+    모순되지 않는 맞춤 PB 진단(단타/스윙/장기 전략)을 생성한다.
+
+    Args:
+        query: 종목명 또는 종목코드/티커.
+        market: "domestic" | "us".
+        quantity: 보유 수량(0보다 커야 함, 호출부에서 검증).
+        avg_price: 매수 평균단가(0보다 커야 함, 호출부에서 검증).
+        target_date: 기준일. None이면 오늘(KST).
+        provider: "openai" | "gemini". None이면 환경 변수로 자동 판단.
+
+    Returns:
+        {meta, holding(수량/평단가/현재가/평가손익), diagnosis(AI 진단), technical(차트용 원본 데이터)}
+    """
+    if market not in ("domestic", "us"):
+        raise ValueError(f"market은 domestic 또는 us여야 합니다: {market!r}")
+
+    resolved_date = _to_date(target_date)
+
+    if market == "domestic":
+        code, name = await asyncio.to_thread(resolve_domestic_ticker, query, resolved_date)
+        ticker = code
+        technical = await asyncio.to_thread(_fetch_stock_technical, code, name, resolved_date)
+    else:
+        ticker = query.strip().upper()
+        name = ticker
+        technical = await asyncio.to_thread(_fetch_us_stock_technical, ticker, name, resolved_date)
+
+    current_price = technical.get("current_price")
+    if current_price is None:
+        raise ValueError(f"{name}({ticker})의 현재가를 확인할 수 없습니다.")
+
+    pnl_amount = (current_price - avg_price) * quantity
+    pnl_pct = (current_price - avg_price) / avg_price * 100
+    position_value = current_price * quantity
+
+    holding = {
+        "name": name,
+        "ticker": ticker,
+        "market": market,
+        "quantity": quantity,
+        "avg_price": avg_price,
+        "current_price": current_price,
+        "current_price_is_realtime": technical.get("current_price_is_realtime", False),
+        "pnl_amount": round(pnl_amount, 2),
+        "pnl_pct": round(pnl_pct, 2),
+        "position_value": round(position_value, 2),
+    }
+
+    market_stance = _load_latest_market_stance()
+    diagnosis_context = {
+        "target_date": resolved_date.isoformat(),
+        "analysis_timestamp": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
+        "holding": holding,
+        "market_stance": market_stance,
+        "technical": _condense_technical({ticker: technical})[ticker],
+    }
+
+    prompt = _build_diagnosis_prompt(diagnosis_context)
+    last_error: Optional[Exception] = None
+    diagnosis_body: Optional[dict] = None
+    for _ in range(MAX_GENERATION_ATTEMPTS):
+        try:
+            raw_text = await call_llm_async(SYSTEM_PROMPT, prompt, provider=provider)
+            parsed = _extract_json(raw_text)
+            _validate_diagnosis(parsed)
+            diagnosis_body = parsed
+            break
+        except Exception as exc:  # noqa: BLE001 - 재시도 후 최종 실패 시 위로 전파
+            last_error = exc
+            continue
+    if diagnosis_body is None:
+        raise RuntimeError(f"보유 종목 진단 생성에 실패했습니다: {last_error}") from last_error
+
+    return {
+        "meta": {
+            "target_date": resolved_date.isoformat(),
+            "generated_at": _now_kst().isoformat(timespec="seconds"),
+            "ai_provider": _resolve_provider(provider),
+        },
+        "holding": holding,
+        "diagnosis": diagnosis_body,
+        # 프론트엔드가 인터랙티브 차트와 동일한 컴포넌트로 렌더링할 수 있도록 원본 기술적
+        # 지표(OHLCV/이평선/피봇/추세선)를 그대로 함께 반환한다.
+        "technical": technical,
+    }
 
 
 def _parse_args() -> argparse.Namespace:

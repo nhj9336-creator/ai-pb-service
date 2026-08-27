@@ -198,3 +198,47 @@ export interface SelectedStock {
   ticker: string;
   recommendation: StockRecommendation;
 }
+
+// --- 보유 종목 맞춤 PB 진단(부가 기능) ---
+
+export type RiskLevel = "낮음" | "보통" | "높음";
+
+export interface DiagnosisStrategy {
+  action: string;
+  risk_level: RiskLevel;
+  risk_reward_note: string;
+}
+
+export interface StockDiagnosis {
+  profit_diagnosis: string;
+  strategies: {
+    day_trading: DiagnosisStrategy;
+    swing: DiagnosisStrategy;
+    long_term: DiagnosisStrategy;
+  };
+  market_consistency_note: string;
+}
+
+export interface StockHolding {
+  name: string;
+  ticker: string;
+  market: "domestic" | "us";
+  quantity: number;
+  avg_price: number;
+  current_price: number;
+  current_price_is_realtime: boolean;
+  pnl_amount: number;
+  pnl_pct: number;
+  position_value: number;
+}
+
+export interface StockDiagnosisResponse {
+  meta: {
+    target_date: string;
+    generated_at: string;
+    ai_provider: string;
+  };
+  holding: StockHolding;
+  diagnosis: StockDiagnosis;
+  technical: TechnicalStock;
+}

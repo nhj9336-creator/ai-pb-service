@@ -1,4 +1,4 @@
-import type { PbReport } from "@/types/report";
+import type { PbReport, StockDiagnosisResponse } from "@/types/report";
 
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -75,4 +75,31 @@ export async function generateReportNow(params: {
   }
   const body = await res.json();
   return body.report as PbReport;
+}
+
+/** 보유 종목 맞춤 PB 진단(부가 기능)을 요청한다. */
+export async function diagnoseStockHolding(params: {
+  query: string;
+  market: "domestic" | "us";
+  quantity: number;
+  avgPrice: number;
+  targetDate?: string;
+  provider?: string;
+}): Promise<StockDiagnosisResponse> {
+  const res = await fetchWithWakeupRetry(`${API_BASE_URL}/api/stock-diagnosis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: params.query,
+      market: params.market,
+      quantity: params.quantity,
+      avg_price: params.avgPrice,
+      target_date: params.targetDate ?? null,
+      provider: params.provider ?? null,
+    }),
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await parseErrorDetail(res));
+  }
+  return res.json();
 }

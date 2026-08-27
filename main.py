@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
 from collector import collect_market_data
-from pb_engine import OUTPUT_PATH_DEFAULT, generate_pb_report_async
+from pb_engine import OUTPUT_PATH_DEFAULT, diagnose_stock_holding, generate_pb_report_async
 
 # Windows 콘솔 기본 인코딩(cp949)에서 한글 로그가 깨지는 것을 방지
 for _stream in (sys.stdout, sys.stderr):
@@ -240,6 +240,44 @@ async def generate_now(payload: Optional[GenerateNowRequest] = None) -> dict:
         raise HTTPException(status_code=500, detail=f"리포트 생성 중 오류가 발생했습니다: {exc}") from exc
 
     return {"message": "리포트가 생성되었습니다.", "report": report}
+
+
+class StockDiagnosisRequest(BaseModel):
+    query: str  # 종목명 또는 종목코드/티커
+    market: str  # "domestic" | "us"
+    quantity: float  # 보유 수량
+    avg_price: float  # 매수 평균단가
+    target_date: Optional[str] = None
+    provider: Optional[str] = None
+
+
+@app.post("/api/stock-diagnosis")
+async def stock_diagnosis(payload: StockDiagnosisRequest) -> dict:
+    """보유 종목 맞춤 PB 진단(부가 기능): 실시간 기술적 지표 조회 + 평가손익 계산 +
+    단타/스윙/장기 전략 AI 진단을 즉시 생성한다. 메인 리포트 생성 락과 무관하게 독립적으로
+    동작한다(수동 조회 성격이 강해 동시에 여러 건이 요청돼도 서로 막을 이유가 없음)."""
+    if payload.market not in ("domestic", "us"):
+        raise HTTPException(status_code=400, detail="market은 domestic 또는 us여야 합니다.")
+    if payload.quantity <= 0 or payload.avg_price <= 0:
+        raise HTTPException(status_code=400, detail="보유 수량과 매수 평균단가는 0보다 커야 합니다.")
+    if not payload.query.strip():
+        raise HTTPException(status_code=400, detail="종목명 또는 종목코드를 입력해 주세요.")
+
+    try:
+        result = await diagnose_stock_holding(
+            query=payload.query,
+            market=payload.market,
+            quantity=payload.quantity,
+            avg_price=payload.avg_price,
+            target_date=payload.target_date,
+            provider=payload.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"보유 종목 진단 생성 중 오류가 발생했습니다: {exc}") from exc
+
+    return result
 
 
 if __name__ == "__main__":

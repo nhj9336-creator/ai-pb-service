@@ -6,6 +6,7 @@ import IndexOverview from "@/components/IndexOverview";
 import CentralReport from "@/components/CentralReport";
 import RecommendedStocks from "@/components/RecommendedStocks";
 import StockChart from "@/components/StockChart";
+import PortfolioDiagnosis from "@/components/PortfolioDiagnosis";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import SectionCard from "@/components/SectionCard";
 import { ApiError, fetchLatestReport, generateReportNow } from "@/lib/api";
@@ -146,6 +147,8 @@ export default function Home() {
               </div>
             )}
           </SectionCard>
+
+          <PortfolioDiagnosis />
 
           <PortfolioAllocation allocation={report.portfolio_allocation} products={report.financial_products} />
 

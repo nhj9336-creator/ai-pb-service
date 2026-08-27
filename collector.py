@@ -588,6 +588,52 @@ def _fetch_realtime_krx_price(code: str) -> Optional[float]:
     return None
 
 
+def resolve_domestic_ticker(query: str, target_date: dt.date) -> tuple[str, str]:
+    """보유 종목 진단 기능에서 사용자가 입력한 "종목명 또는 종목코드"를 (코드, 종목명)
+    튜플로 변환한다.
+
+    1) 6자리 숫자면 종목코드로 간주하고 이름만 조회한다(get_market_ticker_name은 단건
+       조회라 로그인 없이도 동작함 - 실제로 확인함).
+    2) 그 외 문자열이면 종목명으로 간주해 먼저 고정 유니버스(MAJOR_STOCKS)에서 빠르게
+       찾고, 없으면 KRX 전체 종목 목록에서 탐색한다. 이 전체 목록 조회(get_market_ticker_list)는
+       투자자별 거래실적 조회와 마찬가지로 KRX 로그인 세션이 필요하므로, 로그인 정보가
+       없으면 반복 실패 대신 즉시 명확한 에러로 안내한다.
+    """
+    query = query.strip()
+    if re.fullmatch(r"\d{6}", query):
+        try:
+            name = krx.get_market_ticker_name(query)
+        except Exception:
+            name = None
+        return query, (name or query)
+
+    for code, name in MAJOR_STOCKS.items():
+        if name == query:
+            return code, name
+
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        raise ValueError(
+            f"'{query}'는 종목코드가 아니라 종목명으로 보이는데, 종목명 검색에는 KRX 로그인 세션이 "
+            "필요합니다(KRX_ID/KRX_PW 미설정). 정확한 6자리 종목코드를 입력해 주세요."
+        )
+
+    date_str = target_date.strftime("%Y%m%d")
+    for market in ("KOSPI", "KOSDAQ"):
+        try:
+            tickers = krx.get_market_ticker_list(date_str, market=market)
+        except Exception:
+            continue
+        for code in tickers:
+            try:
+                name = krx.get_market_ticker_name(code)
+            except Exception:
+                continue
+            if name == query:
+                return code, name
+
+    raise ValueError(f"'{query}'에 해당하는 국내 종목을 찾을 수 없습니다. 정확한 종목코드(6자리)를 입력해 주세요.")
+
+
 def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
     end_str = target_date.strftime("%Y%m%d")
     start_str = CHART_HISTORY_START_DATE.strftime("%Y%m%d")
