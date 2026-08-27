@@ -195,6 +195,10 @@ def _condense_technical(technical: dict) -> dict:
             "name": t.get("name"),
             "last_date": (t.get("dates") or [None])[-1],
             "close": close,
+            # 장중에는 close가 전일 확정 종가일 수 있다 - current_price_is_realtime이 true면
+            # current_price(실시간에 가까운 시세)를 우선 판단 기준으로 삼을 것.
+            "current_price": t.get("current_price"),
+            "current_price_is_realtime": t.get("current_price_is_realtime", False),
             "moving_averages": mas,
             "trend": _describe_trend(close, mas),
             "pivot_point": t.get("pivot_point"),
@@ -246,9 +250,13 @@ def _condense_news(news: dict, limit_per_query: int = 5) -> list[dict]:
 def build_prompt_context(market_data: dict) -> dict:
     """collect_market_data() 원본 결과를 LLM 프롬프트에 넣기 좋은 형태로 압축한다."""
     technical = market_data.get("technical") or {}
+    meta = market_data.get("meta", {})
     return {
-        "target_date": market_data.get("meta", {}).get("target_date"),
+        "target_date": meta.get("target_date"),
         "analysis_timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # "intraday"(장중, 당일 확정 종가 미게시) | "market_closed"(장마감, 확정 데이터)
+        "data_freshness": meta.get("data_freshness"),
+        "data_freshness_label": meta.get("data_freshness_label"),
         "indices": _condense_indices(market_data.get("indices")),
         "technical": {
             "domestic": _condense_technical(technical.get("domestic")),
@@ -295,8 +303,9 @@ def _build_task_a_prompt(context: dict) -> str:
     """Task A: 시장 총평(수급/장중 대응) + 금융상품 추천 + 자산배분 전략."""
     schema_str = json.dumps(TASK_A_SCHEMA, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
-    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 지수/수급/거시경제 데이터입니다.
-이 시각 이후 시세가 더 움직였을 수 있다는 점을 염두에 두고, "지금 이 시각 기준"임을 리포트 안에서 자연스럽게 드러낼 것.
+    freshness_label = context.get("data_freshness_label") or "시장 데이터"
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 지수/수급/거시경제 데이터입니다.
+data_freshness가 "intraday"이면 당일 공식 종가가 아직 확정되지 않은 장중 시점이라는 뜻이므로, 이 시각 이후 시세가 더 움직일 수 있다는 점을 summary 초반에 자연스럽게 밝힐 것("장중 실시간 기준"임을 명시). data_freshness가 "market_closed"이면 당일 확정 마감 데이터이므로 그렇게 서술할 것(장중이라고 지어내지 말 것).
 
 [시장 데이터]
 {context_str}
@@ -323,13 +332,14 @@ def _build_task_a_prompt(context: dict) -> str:
 def _build_stock_task_prompt(context: dict, market_key: str, schema: dict, count: int, ticker_example: str) -> str:
     schema_str = json.dumps(schema, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
-    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}(장중 실시간)에 수집된 종목별 기술적 지표 데이터입니다.
+    freshness_label = context.get("data_freshness_label") or "시장 데이터"
+    return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 종목별 기술적 지표 데이터입니다.
 
 [기술적 지표 데이터]
 {context_str}
 
 [작성 요구사항]
-1. technical.{market_key}에 있는 종목 {count}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목마다 다음 4가지 객관적 지표를 전부 종합해 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것:
+1. technical.{market_key}에 있는 종목 {count}개 전부에 대해 빠짐없이 분석 항목을 작성할 것(유니버스 종목 각각이 프론트엔드에서 클릭 가능한 카드와 차트로 이어지므로 누락 없이 전부 채워야 한다). 시가총액이나 지명도로 순서를 매기지 말고, 각 종목마다 다음 4가지 객관적 지표를 전부 종합해 냉정하게 평가할 것 - 지표가 약한 종목이라도 risk에 그 약점을 명확히 쓸 것. 종목별 current_price_is_realtime이 true이면 close(전일 확정 종가)가 아니라 current_price(실시간에 가까운 현재가)를 기준으로 등락 위치·돌파/이탈 여부를 판단할 것(장중이라 close가 아직 전일 값으로 남아있는 경우):
    a) moving_averages/trend: 이동평균 정배열(상승 추세)/역배열(하락 추세)/혼조 여부.
    b) pivot_point: 차트에는 피봇(P)·1차저항(R1)·1차지지(S1) 핵심 3선만 표시되므로, 이 3개 가격대를 중심으로 서술할 것(R2/S2는 근거가 필요할 때만 보조적으로 언급).
    c) trend_channel: 고점-고점을 이은 저항 추세선(resistance_trendline), 저점-저점을 이은 지지 추세선(support_trendline)의 최근 값과 방향(상승/하락/횡보). null이면 추세선을 판단할 스윙 포인트가 부족하다는 뜻이니 언급하지 말 것.
@@ -653,15 +663,20 @@ async def generate_pb_report_async(
     full_context = build_prompt_context(market_data)
 
     task_contexts = {
-        "A": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "indices", "macro")},
+        "A": {
+            k: full_context[k]
+            for k in ("target_date", "analysis_timestamp", "data_freshness", "data_freshness_label", "indices", "macro")
+        },
         "B": {
             "target_date": full_context["target_date"],
             "analysis_timestamp": full_context["analysis_timestamp"],
+            "data_freshness_label": full_context["data_freshness_label"],
             "technical": {"domestic": full_context["technical"]["domestic"]},
         },
         "C": {
             "target_date": full_context["target_date"],
             "analysis_timestamp": full_context["analysis_timestamp"],
+            "data_freshness_label": full_context["data_freshness_label"],
             "technical": {"us": full_context["technical"]["us"]},
         },
         "D": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "news")},
@@ -695,12 +710,17 @@ async def generate_pb_report_async(
 
     # 프론트엔드가 캔들차트 등을 그릴 수 있도록 원본 시장 데이터(전체 OHLCV/이평선/지수/거시지표 등)를 함께 저장.
     raw_market_data = {k: v for k, v in market_data.items() if k not in ("meta", "errors")}
+    collector_meta = market_data.get("meta", {})
 
     report = {
         "meta": {
             "target_date": resolved_date.isoformat(),
             "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
             "ai_provider": _resolve_provider(provider),
+            # "intraday"(장중, 당일 확정 종가 미게시) | "market_closed"(장마감, 확정 데이터)
+            "data_freshness": collector_meta.get("data_freshness"),
+            "data_freshness_label": collector_meta.get("data_freshness_label"),
+            "data_asof_time": collector_meta.get("data_asof_time"),
         },
         **report_body,
         "market_data": raw_market_data,

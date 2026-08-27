@@ -71,15 +71,28 @@ export default function Home() {
           <h1 className="text-2xl font-bold tracking-tight text-foreground">PB 프라이빗 전략 데스크</h1>
           <p className="text-sm text-muted">Senior PB 실시간 시장 브리핑 · 기준일 {formatDateLabel(toDateInputValue(selectedDate))}</p>
         </div>
-        {report && (
-          <div className="inline-flex w-fit items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-            </span>
-            장중 실시간 분석 기준 시각 {formatTimestamp(report.meta.generated_at)}
-          </div>
-        )}
+        {report &&
+          (() => {
+            const isIntraday = report.meta.data_freshness === "intraday";
+            const label = report.meta.data_freshness_label ?? (isIntraday ? "장중 실시간 분석" : "장마감 데이터 분석");
+            return (
+              <div
+                className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${
+                  isIntraday
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                    : "border-border bg-surface-elevated text-muted"
+                }`}
+              >
+                <span className="relative flex h-2 w-2">
+                  {isIntraday && (
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                  )}
+                  <span className={`relative inline-flex h-2 w-2 rounded-full ${isIntraday ? "bg-emerald-500" : "bg-muted"}`} />
+                </span>
+                {label} 기준 시각 {formatTimestamp(report.meta.generated_at)}
+              </div>
+            );
+          })()}
       </header>
 
       <DateController

@@ -271,9 +271,10 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       const series = chart.addSeries(LineSeries, {
         color: ma.color,
         lineWidth: 1,
-        title: ma.label,
-        // MA는 보조 지표이므로 지지/저항선과 겹쳐 산만해지지 않도록 자체 기준선(점선)과
-        // 우측 축의 마지막 값 라벨을 끈다(상단 범례로 색상은 이미 구분 가능).
+        // MA는 보조 지표이므로 지지/저항선과 겹쳐 산만해지지 않도록 우측 Y축의 마지막 값
+        // 라벨(색깔 박스)과 자체 기준선(점선)을 모두 끈다 - title도 비워 어떤 경로로도
+        // 라벨 텍스트가 노출되지 않게 한다(상단 범례로 색상은 이미 구분 가능).
+        title: "",
         priceLineVisible: false,
         lastValueVisible: false,
       });

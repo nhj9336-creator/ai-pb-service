@@ -311,7 +311,11 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
 
     df = _retry_with_backoff(_fetch, context=f"flow:{market}")
     if df is None or df.empty:
-        raise ValueError(f"{market}: {target_date} 기준 최근 수급 데이터를 찾을 수 없습니다.")
+        # 장중에는 당일자 수급 통계가 아직 집계되지 않아 조회 구간에 데이터가 전혀 없을 수
+        # 있다(휴장일도 동일). 호출부(collect_index_and_flow_data)가 이미 예외를 잡아
+        # supply_demand=None으로 안전하게 처리하므로, 여기서는 원인이 분명한 메시지로
+        # 빠르게 실패시켜 디버깅을 돕는다.
+        raise ValueError(f"{market}: {target_date} 기준 유효한 수급 데이터가 없습니다(장중 집계 지연 또는 휴장일 가능).")
 
     institution_col = next((c for c in df.columns if "기관" in c), None)
     foreign_col = next((c for c in df.columns if c.startswith("외국인")), None)
@@ -339,10 +343,17 @@ def _fetch_krx_supply_demand(market: str, target_date: dt.date) -> dict:
 
 def _fetch_single_index(name: str, ticker: str, target_date: dt.date) -> dict:
     """지수 하나를 가져온다. KOSPI/KOSDAQ는 KRX 공식 수치를 우선 시도하고(야후 미러보다
-    권위 있는 1차 소스), 실패하면 조용히 yfinance로 폴백한다."""
+    권위 있는 1차 소스), 실패하면 조용히 yfinance로 폴백한다.
+
+    장중(09:00~15:30)에는 KRX 공식 통계에 당일자가 아직 게시되지 않아 조회에는 성공하되
+    전일 종가로 남아있을 수 있다(예외가 아니라 "정상적으로 오래된 값"이라 위 실패 폴백만으로는
+    잡히지 않는다). 오늘 날짜를 조회하는데 KRX 결과가 오늘자가 아니면, 일별 봉이 장중에도
+    실시간으로 갱신되는 yfinance로 대신 폴백해 더 최신 값을 쓴다."""
     if name in KRX_OFFICIAL_INDEX_TICKERS:
         try:
-            return _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
+            snapshot = _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
+            if target_date != dt.date.today() or snapshot.get("date") == target_date.isoformat():
+                return snapshot
         except Exception:
             pass
     return _fetch_yf_index_snapshot(ticker, target_date)
@@ -512,6 +523,7 @@ def _build_technical_payload(df: pd.DataFrame, name: str) -> dict:
         df[f"MA{w}"] = df["종가"].rolling(window=w, min_periods=1).mean()
 
     dates = [d.date().isoformat() for d in df.index]
+    close = [_safe_num(v) for v in df["종가"]]
 
     return {
         "name": name,
@@ -519,13 +531,32 @@ def _build_technical_payload(df: pd.DataFrame, name: str) -> dict:
         "open": [_safe_num(v) for v in df["시가"]],
         "high": [_safe_num(v) for v in df["고가"]],
         "low": [_safe_num(v) for v in df["저가"]],
-        "close": [_safe_num(v) for v in df["종가"]],
+        "close": close,
         "volume": [_safe_int(v) for v in df["거래량"]],
         **{f"ma{w}": [_safe_num(v) for v in df[f"MA{w}"]] for w in MA_WINDOWS},
         "pivot_point": _compute_pivot_levels(df),
         "support_resistance": _compute_support_resistance(df),
         "trend_channel": _compute_trend_channel(df),
+        # 기본값은 마지막 확정 종가. 장중 KRX 통계 지연으로 당일 확정 종가가 아직 없는
+        # 국내 종목은 호출부(_fetch_stock_technical)가 실시간 시세로 덮어쓴다.
+        "current_price": close[-1] if close else None,
+        "current_price_is_realtime": False,
     }
+
+
+def _fetch_realtime_krx_price(code: str) -> Optional[float]:
+    """장중(09:00~15:30)에는 KRX 일별 통계에 당일 확정 종가가 아직 게시되지 않는다.
+    이 경우 yfinance의 실시간에 가까운 시세(KOSPI는 .KS, KOSDAQ은 .KQ)로 현재가를 보완한다.
+    두 접미사 모두 실패하면(상장폐지/코드 오류 등) 예외를 던지지 않고 None을 반환한다 -
+    이 값은 부가 정보일 뿐이므로 실패해도 기존 OHLCV 기반 지표(이평선/피봇 등)는 그대로 유효하다."""
+    for suffix in (".KS", ".KQ"):
+        try:
+            price = yf.Ticker(f"{code}{suffix}").fast_info.last_price
+            if price:
+                return _safe_num(price)
+        except Exception:
+            continue
+    return None
 
 
 def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
@@ -539,7 +570,18 @@ def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
     if df is None or df.empty:
         raise ValueError(f"{code}({name}): OHLCV 데이터를 찾을 수 없습니다.")
 
-    return _build_technical_payload(df, name)
+    payload = _build_technical_payload(df, name)
+
+    # dates[-1]이 target_date(오늘)와 다르면 장중이라 KRX 일별 통계에 당일자가 아직 없다는
+    # 뜻이다(과거 날짜 조회는 원래도 확정 데이터라 이 분기를 타지 않는다). 이 때만 실시간
+    # 시세로 current_price를 보완한다.
+    if target_date == dt.date.today() and payload["dates"] and payload["dates"][-1] != target_date.isoformat():
+        realtime_price = _fetch_realtime_krx_price(code)
+        if realtime_price is not None:
+            payload["current_price"] = realtime_price
+            payload["current_price_is_realtime"] = True
+
+    return payload
 
 
 def _fetch_us_stock_technical(ticker: str, name: str, target_date: dt.date) -> dict:
@@ -795,6 +837,30 @@ def _run_section(section_name: str, fn, *args, **kwargs) -> dict:
         return {"data": {}, "errors": [f"[section:{section_name}] {exc}"]}
 
 
+def _determine_data_freshness(resolved_date: dt.date, indices_data: dict) -> dict:
+    """오늘자 공식 지수 종가가 아직 게시됐는지로 "장중 실시간" vs "장마감" 여부를 판정한다.
+
+    별도의 시계/영업일 판단(휴장일 등) 없이, 실제로 수집된 데이터 자체를 근거로 삼는다 -
+    KOSPI/KOSDAQ 중 하나라도 오늘자 데이터를 확보했으면 장마감(확정) 데이터로 간주하고,
+    조회일이 오늘인데 아직 하나도 오늘자가 없으면 장중(진행 중)으로 간주한다. 과거 날짜
+    조회는 항상 확정 데이터이므로 이 판정 대상이 아니다.
+    """
+    if resolved_date != dt.date.today():
+        return {"status": "market_closed", "label": "장마감 데이터 분석", "asof_time": None}
+
+    today_str = resolved_date.isoformat()
+    has_today_close = any(
+        (snap or {}).get("date") == today_str for snap in (indices_data.get("KOSPI"), indices_data.get("KOSDAQ"))
+    )
+    if has_today_close:
+        return {"status": "market_closed", "label": "장마감 데이터 분석", "asof_time": None}
+    return {
+        "status": "intraday",
+        "label": "장중 실시간 분석",
+        "asof_time": dt.datetime.now().strftime("%H:%M"),
+    }
+
+
 def collect_market_data(target_date: DateLike = None) -> dict:
     """지정일 기준 종합 시장 데이터를 수집해 JSON 직렬화 가능한 dict로 반환한다.
 
@@ -842,10 +908,15 @@ def collect_market_data(target_date: DateLike = None) -> dict:
         + news["errors"]
     )
 
+    freshness = _determine_data_freshness(resolved_date, index_flow["data"])
+
     return {
         "meta": {
             "target_date": resolved_date.isoformat(),
             "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "data_freshness": freshness["status"],
+            "data_freshness_label": freshness["label"],
+            "data_asof_time": freshness["asof_time"],
         },
         "indices": index_flow["data"],
         "technical": {

@@ -75,6 +75,10 @@ export interface TechnicalStock {
   pivot_point: PivotPoint;
   support_resistance: SupportResistance;
   trend_channel: TrendChannel;
+  /** 장중에는 close(전일 확정 종가)와 다를 수 있는, 실시간에 가까운 현재가. */
+  current_price: number | null;
+  /** true면 current_price가 실시간 시세(장중 폴백)로 보완된 값. */
+  current_price_is_realtime: boolean;
 }
 
 export interface MacroPoint {
@@ -143,11 +147,18 @@ export interface PortfolioAllocation {
   rebalancing_strategy: string;
 }
 
+export type DataFreshness = "intraday" | "market_closed";
+
 export interface PbReport {
   meta: {
     target_date: string;
     generated_at: string;
     ai_provider: string;
+    /** "intraday"(장중, 당일 확정 종가 미게시) | "market_closed"(장마감, 확정 데이터) */
+    data_freshness: DataFreshness | null;
+    data_freshness_label: string | null;
+    /** data_freshness가 "intraday"일 때만 값이 있는 "HH:MM" 기준시각. */
+    data_asof_time: string | null;
   };
   market_overview: {
     summary: string;
