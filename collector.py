@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Optional, TypeVar, Union
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import feedparser
 import pandas as pd
@@ -122,9 +123,24 @@ _T = TypeVar("_T")
 # 공통 유틸
 # ---------------------------------------------------------------------------
 
+# 배포 서버(Render 등)는 보통 UTC로 동작하지만, 이 서비스는 한국 투자자를 위한 KRX/국내
+# 시황 서비스이므로 "오늘"/"지금"은 항상 한국 표준시(KST, UTC+9) 기준이어야 한다. 서버
+# 타임존에 의존하는 dt.date.today()/dt.datetime.now()를 직접 쓰지 않고 아래 헬퍼를 통해서만
+# 현재 시각을 구한다.
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _now_kst() -> dt.datetime:
+    return dt.datetime.now(KST)
+
+
+def _today_kst() -> dt.date:
+    return _now_kst().date()
+
+
 def _to_date(target_date: DateLike) -> dt.date:
     if target_date is None:
-        return dt.date.today()
+        return _today_kst()
     if isinstance(target_date, dt.datetime):
         return target_date.date()
     if isinstance(target_date, dt.date):
@@ -211,6 +227,19 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
     last = hist.iloc[-1]
     prev = hist.iloc[-2] if len(hist) >= 2 else None
     last_close = _safe_num(last["Close"])
+    last_date = hist.index[-1].date()
+
+    # 조회 시점이 오늘(KST)이고 방금 받아온 봉도 오늘자라면, 장중에 계속 갱신 중인
+    # "진행 중" 봉일 수 있다 - history()의 일봉 종가보다 fast_info의 실시간 시세가 조회
+    # 시점을 더 정확히 반영하므로 있으면 우선 사용한다(실패해도 일봉 종가로 안전하게 대체).
+    if last_date == target_date == _today_kst():
+        try:
+            live_price = yf.Ticker(ticker).fast_info.last_price
+            if live_price:
+                last_close = _safe_num(live_price)
+        except Exception:
+            pass
+
     prev_close = _safe_num(prev["Close"]) if prev is not None else None
     change = (last_close - prev_close) if (last_close is not None and prev_close is not None) else None
     change_pct = (change / prev_close * 100) if (change is not None and prev_close) else None
@@ -223,7 +252,7 @@ def _fetch_yf_index_snapshot(ticker: str, target_date: dt.date) -> dict:
     ]
 
     return {
-        "date": hist.index[-1].date().isoformat(),
+        "date": last_date.isoformat(),
         "close": last_close,
         "change": _safe_num(change),
         "change_pct": _safe_num(change_pct),
@@ -352,7 +381,7 @@ def _fetch_single_index(name: str, ticker: str, target_date: dt.date) -> dict:
     if name in KRX_OFFICIAL_INDEX_TICKERS:
         try:
             snapshot = _fetch_krx_official_index_snapshot(name, KRX_OFFICIAL_INDEX_TICKERS[name], target_date)
-            if target_date != dt.date.today() or snapshot.get("date") == target_date.isoformat():
+            if target_date != _today_kst() or snapshot.get("date") == target_date.isoformat():
                 return snapshot
         except Exception:
             pass
@@ -575,7 +604,7 @@ def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
     # dates[-1]이 target_date(오늘)와 다르면 장중이라 KRX 일별 통계에 당일자가 아직 없다는
     # 뜻이다(과거 날짜 조회는 원래도 확정 데이터라 이 분기를 타지 않는다). 이 때만 실시간
     # 시세로 current_price를 보완한다.
-    if target_date == dt.date.today() and payload["dates"] and payload["dates"][-1] != target_date.isoformat():
+    if target_date == _today_kst() and payload["dates"] and payload["dates"][-1] != target_date.isoformat():
         realtime_price = _fetch_realtime_krx_price(code)
         if realtime_price is not None:
             payload["current_price"] = realtime_price
@@ -837,28 +866,42 @@ def _run_section(section_name: str, fn, *args, **kwargs) -> dict:
         return {"data": {}, "errors": [f"[section:{section_name}] {exc}"]}
 
 
-def _determine_data_freshness(resolved_date: dt.date, indices_data: dict) -> dict:
-    """오늘자 공식 지수 종가가 아직 게시됐는지로 "장중 실시간" vs "장마감" 여부를 판정한다.
+KRX_MARKET_OPEN = dt.time(9, 0)
+KRX_MARKET_CLOSE = dt.time(15, 30)
 
-    별도의 시계/영업일 판단(휴장일 등) 없이, 실제로 수집된 데이터 자체를 근거로 삼는다 -
-    KOSPI/KOSDAQ 중 하나라도 오늘자 데이터를 확보했으면 장마감(확정) 데이터로 간주하고,
-    조회일이 오늘인데 아직 하나도 오늘자가 없으면 장중(진행 중)으로 간주한다. 과거 날짜
-    조회는 항상 확정 데이터이므로 이 판정 대상이 아니다.
+
+def _is_krx_market_hours_now() -> bool:
+    """지금(KST)이 KRX 정규장 시간(평일 09:00~15:30) 안인지 판단한다.
+
+    공휴일 캘린더까지는 반영하지 않는 단순화된 판단이다(평일이지만 임시 휴장일이면
+    "장중"으로 오판할 수 있음) - 다만 이 정도로도 실제 문제였던 "장중인데 장마감으로 표시"
+    케이스는 정확히 해결된다.
     """
-    if resolved_date != dt.date.today():
+    now = _now_kst()
+    if now.weekday() >= 5:  # 5=토, 6=일
+        return False
+    return KRX_MARKET_OPEN <= now.time() <= KRX_MARKET_CLOSE
+
+
+def _determine_data_freshness(resolved_date: dt.date) -> dict:
+    """조회 시점(KST)이 KRX 정규장 시간 안이면 "장중 실시간", 아니면 "장마감"으로 판정한다.
+
+    이전에는 "지수 데이터에 오늘 날짜가 붙어 있는지"로 판정했으나, yfinance는 장중에도
+    당일 날짜가 붙은 진행 중인 봉을 돌려주기 때문에 그 방식으로는 장중을 장마감으로
+    오판하는 문제가 있었다. 조회 시각의 KST 벽시계 기준으로 직접 판단하는 편이 사용자가
+    실제로 원하는 "지금 이 순간 장이 열려 있는가"에 훨씬 정확히 대응한다. 조회일이
+    오늘이 아니면(과거 날짜 조회) 항상 확정된 장마감 데이터다.
+    """
+    if resolved_date != _today_kst():
         return {"status": "market_closed", "label": "장마감 데이터 분석", "asof_time": None}
 
-    today_str = resolved_date.isoformat()
-    has_today_close = any(
-        (snap or {}).get("date") == today_str for snap in (indices_data.get("KOSPI"), indices_data.get("KOSDAQ"))
-    )
-    if has_today_close:
-        return {"status": "market_closed", "label": "장마감 데이터 분석", "asof_time": None}
-    return {
-        "status": "intraday",
-        "label": "장중 실시간 분석",
-        "asof_time": dt.datetime.now().strftime("%H:%M"),
-    }
+    if _is_krx_market_hours_now():
+        return {
+            "status": "intraday",
+            "label": "장중 실시간 분석",
+            "asof_time": _now_kst().strftime("%H:%M"),
+        }
+    return {"status": "market_closed", "label": "장마감 데이터 분석", "asof_time": None}
 
 
 def collect_market_data(target_date: DateLike = None) -> dict:
@@ -908,12 +951,12 @@ def collect_market_data(target_date: DateLike = None) -> dict:
         + news["errors"]
     )
 
-    freshness = _determine_data_freshness(resolved_date, index_flow["data"])
+    freshness = _determine_data_freshness(resolved_date)
 
     return {
         "meta": {
             "target_date": resolved_date.isoformat(),
-            "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "generated_at": _now_kst().isoformat(timespec="seconds"),
             "data_freshness": freshness["status"],
             "data_freshness_label": freshness["label"],
             "data_asof_time": freshness["asof_time"],

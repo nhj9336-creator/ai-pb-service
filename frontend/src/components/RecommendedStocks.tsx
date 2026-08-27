@@ -46,13 +46,15 @@ function StockCard({ market, recommendation, isSelected, onSelect }: StockCardPr
         </div>
       )}
 
-      <div className="mt-3 space-y-1 text-[11px] text-muted">
-        <p>
-          <span className="font-medium text-foreground/70">매수 관전 포인트</span> {recommendation.buy_point}
-        </p>
-        <p>
-          <span className="font-medium text-foreground/70">투자 리스크</span> {recommendation.risk}
-        </p>
+      <div className="mt-3 space-y-2.5">
+        <div>
+          <p className="mb-1 text-xs font-semibold text-foreground/70">매수 관전 포인트</p>
+          <p className="text-[13px] leading-relaxed text-muted">{recommendation.buy_point}</p>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-semibold text-foreground/70">투자 리스크</p>
+          <p className="text-[13px] leading-relaxed text-muted">{recommendation.risk}</p>
+        </div>
       </div>
     </button>
   );

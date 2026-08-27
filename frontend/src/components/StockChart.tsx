@@ -13,7 +13,7 @@ import {
   type ISeriesApi,
   type Time,
 } from "lightweight-charts";
-import type { SelectedStock, TechnicalStock, TrendLine } from "@/types/report";
+import type { SelectedStock, TechnicalStock } from "@/types/report";
 import { formatKrw, formatNumber, formatUsd } from "@/lib/format";
 
 interface StockChartProps {
@@ -28,6 +28,19 @@ const MA_LINES: { key: "ma5" | "ma20" | "ma60" | "ma120"; label: string; color: 
   { key: "ma20", label: "MA20", color: "#38bdf8b3" },
   { key: "ma60", label: "MA60", color: "#a78bfab3" },
   { key: "ma120", label: "MA120", color: "#94a3b8b3" },
+];
+
+// 지지/저항선·추세선은 캔들 위를 직접 가리지 않도록 이름표를 차트 안에 그리지 않고(우측
+// 축 가격 숫자만 표시), 대신 이 메타데이터로 아래 범례에서 색상-이름을 매칭해 보여준다.
+const PIVOT_LINE_META: { key: "resistance_1" | "pivot" | "support_1"; label: string; color: string }[] = [
+  { key: "resistance_1", label: "저항선 R1", color: "#f97316" },
+  { key: "pivot", label: "피봇 P", color: "#94a3b8" },
+  { key: "support_1", label: "지지선 S1", color: "#34d399" },
+];
+
+const TREND_LINE_META: { key: "resistance_trendline" | "support_trendline"; label: string; color: string }[] = [
+  { key: "resistance_trendline", label: "저항 추세선", color: "#fb923c" },
+  { key: "support_trendline", label: "지지 추세선", color: "#4ade80" },
 ];
 
 type RangeMode = "1y" | "2y" | "all";
@@ -58,7 +71,9 @@ function computeDefaultVisibleRange(dates: string[]): { from: Time; to: Time } |
 }
 
 function buildTechnicalNote(stock: TechnicalStock): string {
-  const close = stock.close[stock.close.length - 1];
+  // 장중에는 close(OHLCV의 마지막 확정 종가)가 전일자로 남아있을 수 있으므로, 실시간에
+  // 가까운 current_price가 있으면 그 값을 기준으로 판단한다.
+  const close = stock.current_price ?? stock.close[stock.close.length - 1];
   const { pivot, resistance_1, support_1 } = stock.pivot_point;
   if (close === null || pivot === null || resistance_1 === null || support_1 === null) {
     return "기술적 지표를 계산하기에 데이터가 부족합니다.";
@@ -351,21 +366,19 @@ export default function StockChart({ selection, stock }: StockChartProps) {
     // 핵심 지지/저항선만 표시(피봇 P, 1차 저항 R1, 1차 지지 S1) - 나머지(R2/S2)는 산만함을
     // 줄이기 위해 차트에서 제외한다(수치 자체는 PB 대응 노트/breakout·stop_loss에서 계속 활용).
     const { pivot_point } = stock;
-    const priceLineSpecs: { price: number | null; title: string; color: string }[] = [
-      { price: pivot_point.resistance_1, title: "저항선 R1", color: "#f97316" },
-      { price: pivot_point.pivot, title: "피봇 P", color: "#94a3b8" },
-      { price: pivot_point.support_1, title: "지지선 S1", color: "#34d399" },
-    ];
-    for (const spec of priceLineSpecs) {
-      if (spec.price === null) continue;
+    for (const meta of PIVOT_LINE_META) {
+      const price = pivot_point[meta.key];
+      if (price === null) continue;
       const line = candleSeries.createPriceLine({
-        price: spec.price,
-        color: spec.color,
+        price,
+        color: meta.color,
         lineWidth: 2,
         lineStyle: LineStyle.Dashed,
-        // 이름표는 캔들 위가 아닌 오른쪽 가격 축 안쪽에만 표시되어 봉/주가를 가리지 않는다.
+        // title을 채우면 lightweight-charts가 그 텍스트를 캔들 위(차트 판) 왼쪽에 직접
+        // 그려 넣어 봉을 가린다 - axisLabelVisible만으로 가격 숫자를 오른쪽 축에 깔끔하게
+        // 표시하고, 어떤 선인지는 아래 범례(색상)로 구분한다.
         axisLabelVisible: true,
-        title: spec.title,
+        title: "",
       });
       priceLinesRef.current.push(line);
     }
@@ -388,21 +401,18 @@ export default function StockChart({ selection, stock }: StockChartProps) {
     if (!showTrendlines) return;
 
     const { trend_channel } = stock;
-    const trendLineSpecs: { line: TrendLine | null; color: string; title: string }[] = [
-      { line: trend_channel?.resistance_trendline ?? null, color: "#fb923c", title: "저항 추세선" },
-      { line: trend_channel?.support_trendline ?? null, color: "#4ade80", title: "지지 추세선" },
-    ];
-    for (const spec of trendLineSpecs) {
-      const line = spec.line;
+    for (const meta of TREND_LINE_META) {
+      const line = trend_channel?.[meta.key] ?? null;
       if (!line || line.start_value === null || line.end_value === null) continue;
       const series = chart.addSeries(LineSeries, {
-        color: spec.color,
+        color: meta.color,
         lineWidth: 3,
         lineStyle: LineStyle.Solid,
-        title: spec.title,
-        // 대각선이라 마지막 값 라벨의 축 위치가 실제 가격과 어긋나 오해를 줄 수 있어 끄고,
-        // 자체 기준선(점선)도 지지/저항선과 겹치지 않도록 끈다.
-        lastValueVisible: false,
+        title: meta.label,
+        // 대각선의 "현재(가장 오른쪽) 값"을 우측 축 라벨로만 보여주고(캔들 위에는 아무것도
+        // 그리지 않음), 전체 폭을 가로지르는 자체 기준선(점선)은 지지/저항선과 겹치지
+        // 않도록 끈다.
+        lastValueVisible: true,
         priceLineVisible: false,
       });
       series.setData([
@@ -423,7 +433,9 @@ export default function StockChart({ selection, stock }: StockChartProps) {
     );
   }
 
-  const lastClose = stock.close[stock.close.length - 1];
+  // 장중에는 close(마지막 확정 종가)가 전일자로 남아있을 수 있으므로, 실시간에 가까운
+  // current_price가 있으면 그 값을 헤더에 우선 표시한다.
+  const displayPrice = stock.current_price ?? stock.close[stock.close.length - 1];
 
   return (
     <div>
@@ -432,7 +444,16 @@ export default function StockChart({ selection, stock }: StockChartProps) {
           <span className="text-sm font-semibold text-foreground">
             {stock.name} ({selection.ticker})
           </span>
-          <span className="ml-2 text-sm text-muted">{formatPrice(lastClose)}</span>
+          <span className="ml-2 text-sm text-muted">{formatPrice(displayPrice)}</span>
+          {stock.current_price_is_realtime && (
+            <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              </span>
+              실시간
+            </span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-muted">
           {MA_LINES.map((ma) => (
@@ -473,6 +494,25 @@ export default function StockChart({ selection, stock }: StockChartProps) {
         </div>
       </div>
 
+      {(showLevels || showTrendlines) && (
+        <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] text-muted">
+          {showLevels &&
+            PIVOT_LINE_META.map((meta) => (
+              <span key={meta.key} className="flex items-center gap-1">
+                <span className="inline-block h-0.5 w-3" style={{ backgroundColor: meta.color }} />
+                {meta.label}
+              </span>
+            ))}
+          {showTrendlines &&
+            TREND_LINE_META.map((meta) => (
+              <span key={meta.key} className="flex items-center gap-1">
+                <span className="inline-block h-0.5 w-3" style={{ backgroundColor: meta.color }} />
+                {meta.label}
+              </span>
+            ))}
+        </div>
+      )}
+
       <div ref={containerRef} className="w-full overflow-hidden rounded-xl border border-border/60" />
 
       <div className="mt-2 flex justify-end gap-1">
@@ -495,10 +535,10 @@ export default function StockChart({ selection, stock }: StockChartProps) {
       <div className="mt-3 rounded-lg border border-accent/30 bg-accent/5 p-3">
         <p className="mb-1 text-xs font-semibold text-accent">PB 대응 노트</p>
         <p className="text-sm leading-relaxed text-foreground/90">{buildTechnicalNote(stock)}</p>
-        <p className="mt-2 text-sm leading-relaxed text-muted">
-          <span className="font-medium text-foreground/70">매수 관전 포인트 — </span>
-          {selection.recommendation.buy_point}
-        </p>
+        <div className="mt-3">
+          <p className="mb-1 text-xs font-semibold text-foreground/70">매수 관전 포인트</p>
+          <p className="text-sm leading-relaxed text-muted">{selection.recommendation.buy_point}</p>
+        </div>
         {(selection.recommendation.breakout_price !== null || selection.recommendation.stop_loss_price !== null) && (
           <div className="mt-2 flex flex-wrap gap-2">
             {selection.recommendation.breakout_price !== null && (

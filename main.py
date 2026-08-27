@@ -148,9 +148,9 @@ async def run_report_pipeline(target_date: Optional[str] = None, provider: Optio
 
 
 def _now_iso() -> str:
-    import datetime as dt
+    from collector import _now_kst
 
-    return dt.datetime.now().isoformat(timespec="seconds")
+    return _now_kst().isoformat(timespec="seconds")
 
 
 def _scheduled_job() -> None:

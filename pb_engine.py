@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
-from collector import DateLike, MAJOR_STOCKS, US_STOCKS, _to_date, collect_market_data
+from collector import DateLike, MAJOR_STOCKS, US_STOCKS, _now_kst, _to_date, collect_market_data
 
 load_dotenv()
 
@@ -253,7 +253,7 @@ def build_prompt_context(market_data: dict) -> dict:
     meta = market_data.get("meta", {})
     return {
         "target_date": meta.get("target_date"),
-        "analysis_timestamp": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "analysis_timestamp": _now_kst().strftime("%Y-%m-%d %H:%M:%S"),
         # "intraday"(장중, 당일 확정 종가 미게시) | "market_closed"(장마감, 확정 데이터)
         "data_freshness": meta.get("data_freshness"),
         "data_freshness_label": meta.get("data_freshness_label"),
@@ -329,10 +329,17 @@ data_freshness가 "intraday"이면 당일 공식 종가가 아직 확정되지 �
 """
 
 
-def _build_stock_task_prompt(context: dict, market_key: str, schema: dict, count: int, ticker_example: str) -> str:
+def _build_stock_task_prompt(
+    context: dict, market_key: str, schema: dict, count: int, ticker_example: str, has_dart: bool
+) -> str:
     schema_str = json.dumps(schema, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
     freshness_label = context.get("data_freshness_label") or "시장 데이터"
+    dart_note = (
+        "dart_disclosures에 이 종목의 공시가 있으면 그 제목을 사실 그대로 인용하고(내용을 임의로 해석하거나 호재/악재를 추측하지 말 것), "
+        if has_dart
+        else ""
+    )
     return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 종목별 기술적 지표 데이터입니다.
 
 [기술적 지표 데이터]
@@ -345,11 +352,10 @@ def _build_stock_task_prompt(context: dict, market_key: str, schema: dict, count
    c) trend_channel: 고점-고점을 이은 저항 추세선(resistance_trendline), 저점-저점을 이은 지지 추세선(support_trendline)의 최근 값과 방향(상승/하락/횡보). null이면 추세선을 판단할 스윙 포인트가 부족하다는 뜻이니 언급하지 말 것.
    d) volume_momentum: latest_volume이 avg_volume_20d 대비 몇 배(volume_ratio)인지 - ratio가 1.5 이상이면 "거래량을 실은" 신뢰도 높은 신호, 1.0 미만이면 "거래량이 실리지 않은" 약한 신호로 명시적으로 구분할 것.
    각각 종목명·티커·추천 이유·매수 관전 포인트·투자 리스크를 제시할 것.
-   - buy_point는 최소 3~4문장 분량으로, 다음 구조를 갖춘 상세한 PB 대응 노트로 작성할 것(짧은 한 줄 요약 금지):
-     (1) 왜 이 가격대가 관전포인트인지 - 피봇/추세선 가격이 어떤 의미를 갖는지 근거를 밝힐 것(예: "피봇(P)은 최근 5거래일(주간) 고가·저가와 최근 종가로 산출한 피보나치 피봇으로, 스윙 구간의 매수·매도 균형점을 나타내는 기준가입니다. 현재가가 그 위에 있다는 것은...").
-     (2) 저항 추세선·피봇 저항선(P/R1)이 겹치는 구간을 거래량 동반(volume_ratio 1.5배 이상) 돌파할 때와, 거래량 없이(1.0배 미만) 돌파할 때를 구분해 각각 어떻게 대응할지 - 거래량이 뒷받침되지 않는 돌파는 매수 주체의 참여가 얕아 되돌림(가짜 돌파) 가능성이 높다는 기술적 분석 근거를 명시할 것.
-     (3) 지지 추세선·피봇 지지선(P/S1) 이탈 시 손절/비중조절 기준을 실제 가격과 함께 제시할 것.
-     감정적 수식어("기대된다", "유망하다") 없이 수치와 인과관계로만 서술할 것.
+   - buy_point는 3~4문장 분량으로, 차트 근거와 모멘텀·매크로 근거를 함께 담은 PB 대응 노트로 작성할 것(짧은 한 줄 요약 금지):
+     (1) 차트 근거(1~2문장, 핵심만 압축): 이 가격대가 관전포인트인 이유(피봇/추세선의 의미)와, 거래량 동반(volume_ratio 1.5배 이상) 돌파 시·거래량 없는(1.0배 미만) 돌파 시의 대응 차이를 간결히 제시하고(거래량이 뒷받침되지 않으면 되돌림/가짜 돌파 가능성이 높다는 근거만 짧게 짚을 것), 지지선 이탈 시 손절 기준(실제 가격 포함)을 이어 붙일 것.
+     (2) 모멘텀·매크로 근거(1~2문장): {dart_note}news/macro 중 이 종목·업종과 명백히 관련된 항목이 있으면 함께 짚을 것(실적 발표, 산업 이슈, 금리·거시 이벤트, 지정학적 이슈 등). 관련된 사실이 데이터에 전혀 없으면 이 문장은 생략하고 (1)만으로 구성할 것 - 근거 없는 이유를 지어내지 말 것.
+     감정적 수식어("기대된다", "유망하다") 없이 수치와 사실 근거로만 서술할 것.
    - breakout_price에는 technical의 resistance_1(또는 prev_high, 저항 추세선 근접값) 등을 근거로 한 상승 돌파 대응 가격을, stop_loss_price에는 support_1(또는 prev_low, 지지 추세선 근접값) 등을 근거로 한 손절/비중조절 가격을 실제 숫자로 넣을 것. 근거가 부족하면 null로 둘 것(임의 추정 금지).
    - ticker 필드는 반드시 technical.{market_key}의 키(종목코드 또는 티커)와 정확히 동일한 값을 사용할 것(예: "{ticker_example}").
 2. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것. 정확히 {count}개의 원소를 가질 것.
@@ -361,12 +367,17 @@ def _build_stock_task_prompt(context: dict, market_key: str, schema: dict, count
 
 def _build_task_b_prompt(context: dict) -> str:
     """Task B: 국내 종목 PB 전략 노트."""
-    return _build_stock_task_prompt(context, "domestic", TASK_B_SCHEMA, DOMESTIC_RECOMMENDATION_COUNT, "005930")
+    return _build_stock_task_prompt(
+        context, "domestic", TASK_B_SCHEMA, DOMESTIC_RECOMMENDATION_COUNT, "005930", has_dart=True
+    )
 
 
 def _build_task_c_prompt(context: dict) -> str:
-    """Task C: 미국 종목 PB 전략 노트."""
-    return _build_stock_task_prompt(context, "us", TASK_C_SCHEMA, US_RECOMMENDATION_COUNT, "AAPL")
+    """Task C: 미국 종목 PB 전략 노트. DART는 국내 전자공시 시스템이라 미국 종목에는 데이터가
+    없으므로(has_dart=False), 프롬프트에서 DART 언급 자체를 하지 않는다."""
+    return _build_stock_task_prompt(
+        context, "us", TASK_C_SCHEMA, US_RECOMMENDATION_COUNT, "AAPL", has_dart=False
+    )
 
 
 def _build_task_d_prompt(context: dict) -> str:
@@ -672,12 +683,25 @@ async def generate_pb_report_async(
             "analysis_timestamp": full_context["analysis_timestamp"],
             "data_freshness_label": full_context["data_freshness_label"],
             "technical": {"domestic": full_context["technical"]["domestic"]},
+            # 매수 관전포인트에 모멘텀/매크로 근거(실적 공시, 관련 뉴스, 금리 등)를 사실에
+            # 근거해 덧붙일 수 있도록 국내 종목 유니버스에 해당하는 공시만 추려 전달한다.
+            "dart_disclosures": {
+                code: v
+                for code, v in full_context["dart_disclosures"].items()
+                if code in full_context["technical"]["domestic"]
+            },
+            "macro": full_context["macro"],
+            "news": full_context["news"],
         },
         "C": {
             "target_date": full_context["target_date"],
             "analysis_timestamp": full_context["analysis_timestamp"],
             "data_freshness_label": full_context["data_freshness_label"],
             "technical": {"us": full_context["technical"]["us"]},
+            # DART는 국내 전자공시 시스템이라 미국 종목에는 해당 데이터가 없으므로 dart_disclosures는
+            # 전달하지 않는다(has_dart=False와 짝을 맞춤).
+            "macro": full_context["macro"],
+            "news": full_context["news"],
         },
         "D": {k: full_context[k] for k in ("target_date", "analysis_timestamp", "news")},
     }
@@ -715,7 +739,7 @@ async def generate_pb_report_async(
     report = {
         "meta": {
             "target_date": resolved_date.isoformat(),
-            "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "generated_at": _now_kst().isoformat(timespec="seconds"),
             "ai_provider": _resolve_provider(provider),
             # "intraday"(장중, 당일 확정 종가 미게시) | "market_closed"(장마감, 확정 데이터)
             "data_freshness": collector_meta.get("data_freshness"),
