@@ -167,6 +167,10 @@ export interface PbReport {
     supply_demand_status: SupplyDemandStatus;
     supply_demand_analysis: string;
     intraday_playbook: string;
+    /** Option A - 지수가 주요 저항선을 안착 돌파했을 때의 계좌 전체(주식 비중 확대/주도 섹터) 대응 전략. */
+    account_scenario_bullish: string;
+    /** Option B - 지수가 주요 지지선을 이탈했을 때의 계좌 전체(현금 비중 확대/관망 기준) 대응 전략. */
+    account_scenario_bearish: string;
   };
   news_impact_analysis: NewsImpactAnalysis[];
   recommended_stocks: {

@@ -63,6 +63,8 @@ TASK_A_SCHEMA = {
         "supply_demand_status": "매집 | 이탈 | 혼조 | 데이터없음 중 하나 (기관/외국인/개인 수급 데이터가 없으면 데이터없음)",
         "supply_demand_analysis": "국내 증시 수급 심층 분석 3~5문장. institution_net_buy/foreign_net_buy/individual_net_buy가 있으면 recent_days 시계열(날짜별 종가+기관/외국인/개인 순매수)을 대조해 (1)기관·외국인·개인 3주체의 매매 방향이 서로 같은지/엇갈리는지(예: 외국인·기관 매수 vs 개인 매도의 손바뀜 구도), (2)순매수가 집중된 종가 구간(매집 구간)과 순매도가 집중된 구간(이탈 구간)을 실제 가격 수치로 제시할 것. institution_net_buy/foreign_net_buy/individual_net_buy가 모두 null이면(데이터 미제공) 이를 명시하고 change_pct·volume 기반 장중 모멘텀 해석으로 대체할 것",
         "intraday_playbook": "장중 실시간 대응 시나리오 2~3문장. '상승 돌파 시(구체적 가격 이상)' 대응과 '지지선 이탈 시(구체적 가격 이하)' 손절/비중조절 기준을 각각 실제 수치로 명시할 것",
+        "account_scenario_bullish": "Option A - 지수가 주요 저항선을 안착 돌파했을 때의 계좌 전체 대응 전략 2~3문장. 종목별 타점이 아니라 '주식 비중을 얼마나 늘릴지'와 '어떤 업종/섹터가 주도할지'를 실제 지수 가격 기준과 함께 제시",
+        "account_scenario_bearish": "Option B - 지수가 주요 지지선을 이탈했을 때의 계좌 전체 대응 전략 2~3문장. 종목별 타점이 아니라 '현금 비중을 얼마나 늘리고 어떤 기준으로 관망할지'를 실제 지수 가격 기준과 함께 제시",
     },
     "financial_products": [
         {
@@ -84,7 +86,7 @@ TASK_A_SCHEMA = {
             {"name": "리츠/대체투자", "percent": 10, "representative_instruments": "예: 국내외 리츠 ETF 실명"},
             {"name": "현금성자산", "percent": 15, "representative_instruments": "파킹형 상품 또는 단기 CMA 등"},
         ],
-        "rebalancing_strategy": "현재 시장 상황에 맞춘 리밸런싱 전략 2~3문장 (예: 비중 확대/축소할 자산군과 그 이유, 리밸런싱 주기 제안)",
+        "rebalancing_strategy": "VIP 고객 1:1 브리핑 톤의 리밸런싱 전략 2~3문장. 단순 비율 나열이 아니라 '왜 지금 이 시점에' 이 비중으로 조정해야 하는지를 매크로 지표(금리·환율 등)와 증시 수급 흐름 등 객관적 팩트에 근거해 구체적으로 설명할 것",
     },
 }
 
@@ -320,9 +322,14 @@ data_freshness가 "intraday"이면 당일 공식 종가가 아직 확정되지 �
      supply_demand_date가 target_date보다 이전이면 "직전 영업일 기준" 데이터임을 밝힐 것.
    - institution_net_buy/foreign_net_buy/individual_net_buy가 모두 null이면(KRX 로그인 미설정 등으로 수급 데이터 자체가 없는 경우) supply_demand_status를 "데이터없음"으로 설정하고 이를 명시한 뒤, 대신 change_pct(등락률)와 volume(거래량)을 근거로 한 장중 모멘텀 분석으로 대체할 것.
    - intraday_playbook에는 "OO,OOO원 상향 돌파 시 추가 매수/비중 확대", "OO,OOO원 이탈 시 손절 또는 비중 축소"처럼 지수의 실제 가격 수치를 기준으로 한 이분법적 시나리오를 제시할 것.
-2. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것(financial_products).
-3. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것. rebalancing_strategy에는 현재 시장 상황에 맞춘 구체적 리밸런싱 전략을 서술할 것.
-4. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것.
+2. account_scenario_bullish/account_scenario_bearish에는 종목별 타점이 아니라 "계좌 전체" 관점의 조건부 대응 시나리오를 둘로 나눠 제시할 것(거시적 포트폴리오 관점):
+   - account_scenario_bullish (Option A, 상방 시나리오): KOSPI/KOSDAQ 또는 대표 지수가 pivot_point/trend_channel 등 데이터상의 주요 저항선을 안착 돌파했을 때, 계좌 내 주식 비중을 얼마나/어떻게 확대할지와 그 국면에서 수급·거래량상 주도력이 있는 섹터를 실제 수치에 근거해 제시할 것.
+   - account_scenario_bearish (Option B, 하방 시나리오): 주요 지지선을 이탈했을 때, 리스크 관리를 위해 현금 비중을 얼마나 확대하고 어떤 조건(가격/수급 재확인 등)을 관망 기준으로 삼을지 제시할 것.
+   - 두 시나리오 모두 지어낸 추측이 아니라 이미 계산된 지수 가격 데이터(indices의 close/recent_days, technical 근거는 여기 없으므로 지수 자체의 가격 흐름과 수급 데이터)만으로 판단할 것. 확정할 근거가 부족하면 보수적으로 "현 비중 유지"를 기본값으로 서술할 것 - 없는 수치를 지어내지 말 것.
+3. 현재 시장 상황(금리, 수급, 지수 흐름)에 맞는 맞춤형 금융 상품(섹터 ETF, 채권형 상품, MMF, 리츠 등)을 자산관리 전략과 함께 추천할 것(financial_products).
+4. portfolio_allocation.assets에 국내주식/미국주식/채권·MMF/리츠·대체투자/현금성자산 등 자산군별 추천 비중(percent, 정수)을 제시하고 percent 합계는 100이 되도록 할 것. 각 자산군의 representative_instruments에는 실제 존재하는 대표 종목/ETF명(예: KODEX 200, TIGER 미국S&P500, TLT 등)과 비중 조절 가이드를 구체적으로 명시할 것 - 카테고리명만 나열하지 말 것.
+   - rebalancing_strategy는 단순히 "비중을 몇 %로 하라"는 나열이 아니라, VIP 고객에게 1:1로 브리핑하는 Senior PB의 어조(냉철하고 전문적이되 친절한 설명)로 "왜 지금 이 시점에" 이 비중으로 조정해야 하는지를 서술할 것 - macro(금리·환율 등 거시지표)와 indices의 수급/가격 흐름 중 실제로 제공된 객관적 팩트를 최소 1개 이상 근거로 명시적으로 인용하고, 데이터에 없는 이유를 지어내지 말 것.
+5. 아래 JSON 스키마와 정확히 동일한 키 구조로, 다른 어떤 텍스트도 없이 JSON 객체 하나만 출력할 것.
 
 [출력 JSON 스키마]
 {schema_str}
@@ -561,6 +568,10 @@ def _validate_task_a(data: dict) -> None:
         raise ValueError("market_overview.supply_demand_analysis가 비어있습니다.")
     if not overview.get("intraday_playbook"):
         raise ValueError("market_overview.intraday_playbook이 비어있습니다.")
+    if not overview.get("account_scenario_bullish"):
+        raise ValueError("market_overview.account_scenario_bullish가 비어있습니다.")
+    if not overview.get("account_scenario_bearish"):
+        raise ValueError("market_overview.account_scenario_bearish가 비어있습니다.")
 
     if not isinstance(data.get("financial_products"), list):
         raise ValueError("financial_products는 리스트여야 합니다.")

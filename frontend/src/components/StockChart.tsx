@@ -409,10 +409,10 @@ export default function StockChart({ selection, stock }: StockChartProps) {
         lineWidth: 3,
         lineStyle: LineStyle.Solid,
         title: meta.label,
-        // 대각선의 "현재(가장 오른쪽) 값"을 우측 축 라벨로만 보여주고(캔들 위에는 아무것도
-        // 그리지 않음), 전체 폭을 가로지르는 자체 기준선(점선)은 지지/저항선과 겹치지
-        // 않도록 끈다.
-        lastValueVisible: true,
+        // 대각선이 도달한 "현재(가장 오른쪽) 값"이 캔들 가격대와 거의 겹치는 경우가 많아,
+        // 축 라벨(lastValueVisible)까지 켜면 우측 Y축 부근에서 캔들/가격을 가린다. 상단
+        // 범례로 이미 색상-이름을 구분할 수 있으므로 축 라벨과 자체 기준선(점선) 모두 끈다.
+        lastValueVisible: false,
         priceLineVisible: false,
       });
       series.setData([

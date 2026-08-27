@@ -42,6 +42,17 @@ export default function CentralReport({ report }: { report: PbReport }) {
           <p className="mb-1 text-xs font-semibold text-accent">장중 대응 시나리오</p>
           <p className="text-sm leading-relaxed text-foreground/90">{market_overview.intraday_playbook}</p>
         </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+            <p className="mb-1 text-xs font-semibold text-emerald-400">Option A · 상방 돌파 시 계좌 대응</p>
+            <p className="text-sm leading-relaxed text-foreground/90">{market_overview.account_scenario_bullish}</p>
+          </div>
+          <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3">
+            <p className="mb-1 text-xs font-semibold text-rose-400">Option B · 하방 이탈 시 계좌 대응</p>
+            <p className="text-sm leading-relaxed text-foreground/90">{market_overview.account_scenario_bearish}</p>
+          </div>
+        </div>
       </SectionCard>
 
       <NewsImpact items={report.news_impact_analysis} onHeightChange={handleNewsHeightChange} />
