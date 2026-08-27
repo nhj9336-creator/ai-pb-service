@@ -2,62 +2,21 @@
 
 import { useState } from "react";
 import SectionCard from "./SectionCard";
-import StockPriceChart from "./StockPriceChart";
 import { ApiError, diagnoseStockHolding } from "@/lib/api";
-import { changeColorClass, formatKrw, formatNumber, formatPercent, formatUsd } from "@/lib/format";
-import type { DiagnosisStrategy, RiskLevel, StockDiagnosisResponse } from "@/types/report";
+import type { StockDiagnosisResponse } from "@/types/report";
 
-const RISK_STYLES: Record<RiskLevel, string> = {
-  낮음: "bg-emerald-500/15 text-emerald-400 border-emerald-500/40",
-  보통: "bg-amber-500/15 text-amber-400 border-amber-500/40",
-  높음: "bg-rose-500/15 text-rose-400 border-rose-500/40",
-};
-
-const STRATEGY_META: { key: "day_trading" | "swing" | "long_term"; label: string; horizon: string }[] = [
-  { key: "day_trading", label: "단타", horizon: "당일 ~ 수일" },
-  { key: "swing", label: "스윙", horizon: "수주 ~ 수개월" },
-  { key: "long_term", label: "장기투자", horizon: "수개월 이상" },
-];
-
-function StrategyCard({
-  label,
-  horizon,
-  strategy,
-}: {
-  label: string;
-  horizon: string;
-  strategy: DiagnosisStrategy;
-}) {
-  return (
-    <div className="rounded-lg border border-border/60 bg-surface-elevated p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div>
-          <p className="text-sm font-semibold text-foreground">{label}</p>
-          <p className="text-[11px] text-muted">{horizon}</p>
-        </div>
-        <span
-          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${RISK_STYLES[strategy.risk_level]}`}
-        >
-          리스크 {strategy.risk_level}
-        </span>
-      </div>
-      <p className="text-[13px] leading-relaxed text-foreground/90">{strategy.action}</p>
-      <p className="mt-2 text-[13px] leading-relaxed text-muted">
-        <span className="font-medium text-foreground/70">위험 대비 기대수익 — </span>
-        {strategy.risk_reward_note}
-      </p>
-    </div>
-  );
+interface PortfolioDiagnosisProps {
+  /** 진단 성공 시 결과를 전달한다 - 상단 인터랙티브 차트를 이 종목으로 스위칭하는 데 쓰인다. */
+  onDiagnosed: (result: StockDiagnosisResponse) => void;
 }
 
-export default function PortfolioDiagnosis() {
+export default function PortfolioDiagnosis({ onDiagnosed }: PortfolioDiagnosisProps) {
   const [query, setQuery] = useState("");
   const [market, setMarket] = useState<"domestic" | "us">("domestic");
   const [quantity, setQuantity] = useState("");
   const [avgPrice, setAvgPrice] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<StockDiagnosisResponse | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,29 +34,26 @@ export default function PortfolioDiagnosis() {
     setLoading(true);
     setError(null);
     try {
-      const diagnosis = await diagnoseStockHolding({
+      const result = await diagnoseStockHolding({
         query: query.trim(),
         market,
         quantity: quantityNum,
         avgPrice: avgPriceNum,
       });
-      setResult(diagnosis);
+      onDiagnosed(result);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "진단 생성에 실패했습니다.");
-      setResult(null);
     } finally {
       setLoading(false);
     }
   };
 
-  const formatPrice = result?.holding.market === "us" ? formatUsd : formatKrw;
-
   return (
     <SectionCard title="보유 종목 맞춤 PB 진단" icon={<span>🩺</span>}>
       <p className="mb-4 text-xs leading-relaxed text-muted">
-        보유 중인 종목의 수량과 평균단가를 입력하면, 위 인터랙티브 차트와 동일한 방식으로 시각화하고
-        수익률·투자 호흡별(단타/스윙/장기) 대응 전략을 진단해드립니다. 진단은 오늘의 시장 총평 스탠스와
-        모순되지 않도록 연결됩니다.
+        보유 중인 종목의 수량과 평균단가를 입력하면, 위 인터랙티브 차트가 해당 종목으로 전환되어
+        지지/저항선·이평선·피봇을 즉시 보여주고, 그 아래에 수익률·투자 호흡별(단타/스윙/장기) 대응
+        전략을 진단해드립니다. 진단은 오늘의 시장 총평 스탠스와 모순되지 않도록 연결됩니다.
       </p>
 
       <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-3">
@@ -158,55 +114,6 @@ export default function PortfolioDiagnosis() {
       {error && (
         <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
           {error}
-        </div>
-      )}
-
-      {result && (
-        <div className="mt-5 space-y-4 border-t border-border/60 pt-5">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-surface-elevated p-3">
-            <div>
-              <span className="text-sm font-semibold text-foreground">
-                {result.holding.name} ({result.holding.ticker})
-              </span>
-              <span className="ml-2 text-xs text-muted">
-                {formatNumber(result.holding.quantity, 0)}주 · 평단 {formatPrice(result.holding.avg_price)}
-              </span>
-            </div>
-            <div className="text-right">
-              <div className={`text-base font-semibold ${changeColorClass(result.holding.pnl_amount)}`}>
-                {formatPrice(result.holding.pnl_amount)} ({formatPercent(result.holding.pnl_pct)})
-              </div>
-              <div className="text-xs text-muted">평가금액 {formatPrice(result.holding.position_value)}</div>
-            </div>
-          </div>
-
-          <StockPriceChart
-            name={result.technical.name}
-            ticker={result.holding.ticker}
-            market={result.holding.market}
-            stock={result.technical}
-          />
-
-          <div className="rounded-lg border border-accent/30 bg-accent/5 p-3">
-            <p className="mb-1 text-xs font-semibold text-accent">수익률 진단</p>
-            <p className="text-sm leading-relaxed text-foreground/90">{result.diagnosis.profit_diagnosis}</p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            {STRATEGY_META.map((meta) => (
-              <StrategyCard
-                key={meta.key}
-                label={meta.label}
-                horizon={meta.horizon}
-                strategy={result.diagnosis.strategies[meta.key]}
-              />
-            ))}
-          </div>
-
-          <div className="rounded-lg border border-border/60 bg-surface-elevated p-3">
-            <p className="mb-1 text-xs font-semibold text-foreground/70">시장 총평과의 연결</p>
-            <p className="text-[13px] leading-relaxed text-muted">{result.diagnosis.market_consistency_note}</p>
-          </div>
         </div>
       )}
     </SectionCard>

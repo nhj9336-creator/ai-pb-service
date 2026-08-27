@@ -1,25 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import DateController from "@/components/DateController";
 import IndexOverview from "@/components/IndexOverview";
 import CentralReport from "@/components/CentralReport";
 import RecommendedStocks from "@/components/RecommendedStocks";
 import StockChart from "@/components/StockChart";
+import StockPriceChart from "@/components/StockPriceChart";
+import DiagnosisReport from "@/components/DiagnosisReport";
 import PortfolioDiagnosis from "@/components/PortfolioDiagnosis";
 import PortfolioAllocation from "@/components/PortfolioAllocation";
 import SectionCard from "@/components/SectionCard";
 import { ApiError, fetchLatestReport, generateReportNow } from "@/lib/api";
 import { formatDateLabel, formatTimestamp, parseDateInputValue, toDateInputValue } from "@/lib/format";
-import type { PbReport, SelectedStock } from "@/types/report";
+import type { PbReport, SelectedStock, StockDiagnosisResponse } from "@/types/report";
 
 export default function Home() {
   const [report, setReport] = useState<PbReport | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [selectedStock, setSelectedStock] = useState<SelectedStock | null>(null);
+  // 보유 종목 진단 결과 - 값이 있으면 상단 인터랙티브 차트가 추천 종목 대신 이 종목으로
+  // 전환되고, 그 아래에 진단 리포트가 노출된다.
+  const [diagnosisResult, setDiagnosisResult] = useState<StockDiagnosisResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const chartSectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetchLatestReport()
@@ -27,6 +33,7 @@ export default function Home() {
         setReport(data);
         setSelectedDate(parseDateInputValue(data.meta.target_date));
         setSelectedStock(null);
+        setDiagnosisResult(null);
       })
       .catch((err) => {
         if (err instanceof ApiError && err.status === 404) {
@@ -45,11 +52,24 @@ export default function Home() {
       const data = await generateReportNow({ targetDate: toDateInputValue(selectedDate) });
       setReport(data);
       setSelectedStock(null);
+      setDiagnosisResult(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "리포트 생성에 실패했습니다.");
     } finally {
       setLoading(false);
     }
+  };
+
+  // 추천 종목 카드를 새로 고르면 진단 뷰에서 다시 추천 종목 뷰로 돌아간다.
+  const handleSelectStock = (selection: SelectedStock) => {
+    setDiagnosisResult(null);
+    setSelectedStock(selection);
+  };
+
+  // 진단이 완료되면 그 결과로 상단 차트를 전환하고, 차트 섹션으로 스크롤해 바로 보이게 한다.
+  const handleDiagnosed = (result: StockDiagnosisResponse) => {
+    setDiagnosisResult(result);
+    chartSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   // 사용자가 명시적으로 종목을 고르지 않았다면 국내 1순위 추천 종목을 기본 선택으로 파생한다.
@@ -134,21 +154,49 @@ export default function Home() {
 
           <CentralReport report={report} />
 
-          <SectionCard title="추천 종목 & 인터랙티브 차트" icon={<span>📈</span>}>
-            <RecommendedStocks
-              domestic={report.recommended_stocks.domestic}
-              us={report.recommended_stocks.us}
-              selected={activeSelection}
-              onSelect={setSelectedStock}
-            />
-            {activeSelection && (
-              <div className="mt-6 border-t border-border/60 pt-6">
-                <StockChart selection={activeSelection} stock={selectedTechnical} />
-              </div>
-            )}
-          </SectionCard>
+          <div ref={chartSectionRef}>
+            <SectionCard title="추천 종목 & 인터랙티브 차트" icon={<span>📈</span>}>
+              <RecommendedStocks
+                domestic={report.recommended_stocks.domestic}
+                us={report.recommended_stocks.us}
+                selected={activeSelection}
+                onSelect={handleSelectStock}
+              />
+              {diagnosisResult ? (
+                <div className="mt-6 border-t border-border/60 pt-6">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-xs font-semibold text-accent">
+                      🩺 보유 종목 진단 뷰
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDiagnosisResult(null)}
+                      className="rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent"
+                    >
+                      추천 종목 차트로 돌아가기
+                    </button>
+                  </div>
+                  <StockPriceChart
+                    name={diagnosisResult.technical.name}
+                    ticker={diagnosisResult.holding.ticker}
+                    market={diagnosisResult.holding.market}
+                    stock={diagnosisResult.technical}
+                  />
+                  <div className="mt-3">
+                    <DiagnosisReport result={diagnosisResult} />
+                  </div>
+                </div>
+              ) : (
+                activeSelection && (
+                  <div className="mt-6 border-t border-border/60 pt-6">
+                    <StockChart selection={activeSelection} stock={selectedTechnical} />
+                  </div>
+                )
+              )}
+            </SectionCard>
+          </div>
 
-          <PortfolioDiagnosis />
+          <PortfolioDiagnosis onDiagnosed={handleDiagnosed} />
 
           <PortfolioAllocation allocation={report.portfolio_allocation} products={report.financial_products} />
 
