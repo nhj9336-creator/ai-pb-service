@@ -487,10 +487,20 @@ def _build_task_d_prompt(context: dict) -> str:
 
 
 def _build_diagnosis_prompt(context: dict) -> str:
-    """보유 종목 맞춤 진단(부가 기능) 프롬프트."""
+    """보유 종목 맞춤 진단(부가 기능) 프롬프트.
+
+    [분석 대상] 줄을 항상 고정 포맷("종목명 (종목코드)")으로 못박는 이유: 사용자가 화면에
+    이름으로 입력하든 코드로 입력하든 resolve_domestic_ticker()가 이미 동일한 (코드, 공식명)
+    쌍으로 수렴시켰으므로(collector.resolve_domestic_ticker 참고), 프롬프트에서도 그 확정된
+    쌍만 유일한 분석 대상으로 제시해 LLM이 사용자의 원문 입력 형태(이름/코드/띄어쓰기 차이)에
+    따라 서로 다른 맥락으로 해석할 여지를 없앤다.
+    """
     schema_str = json.dumps(TASK_DIAGNOSIS_SCHEMA, ensure_ascii=False, indent=2)
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
-    return f"""아래는 고객이 보유 중인 종목 1개에 대한 진단 요청 데이터입니다. {context.get('target_date')} 기준, {context.get('analysis_timestamp')}에 수집됐습니다.
+    holding = context.get("holding", {})
+    return f"""[분석 대상]: {holding.get('name')} ({holding.get('ticker')})
+
+아래는 위 종목 1개에 대한 보유자의 진단 요청 데이터입니다. {context.get('target_date')} 기준, {context.get('analysis_timestamp')}에 수집됐습니다.
 
 [보유 종목 및 시장 데이터]
 {context_str}

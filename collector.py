@@ -588,50 +588,99 @@ def _fetch_realtime_krx_price(code: str) -> Optional[float]:
     return None
 
 
-def resolve_domestic_ticker(query: str, target_date: dt.date) -> tuple[str, str]:
-    """보유 종목 진단 기능에서 사용자가 입력한 "종목명 또는 종목코드"를 (코드, 종목명)
-    튜플로 변환한다.
+def _safe_ticker_name(code: str) -> Optional[str]:
+    """krx.get_market_ticker_name()의 안전한 래퍼.
 
-    1) 6자리 숫자면 종목코드로 간주하고 이름만 조회한다(get_market_ticker_name은 단건
-       조회라 로그인 없이도 동작함 - 실제로 확인함).
-    2) 그 외 문자열이면 종목명으로 간주해 먼저 고정 유니버스(MAJOR_STOCKS)에서 빠르게
-       찾고, 없으면 KRX 전체 종목 목록에서 탐색한다. 이 전체 목록 조회(get_market_ticker_list)는
-       투자자별 거래실적 조회와 마찬가지로 KRX 로그인 세션이 필요하므로, 로그인 정보가
-       없으면 반복 실패 대신 즉시 명확한 에러로 안내한다.
-    """
-    query = query.strip()
-    if re.fullmatch(r"\d{6}", query):
-        try:
-            name = krx.get_market_ticker_name(query)
-        except Exception:
-            name = None
-        return query, (name or query)
+    존재하지 않는 코드를 조회하면 pykrx는 예외를 던지는 대신 빈 DataFrame을 반환하는
+    버그가 있다(실제로 확인함) - 이를 그대로 `if not name`처럼 진리값 검사하면
+    "The truth value of a DataFrame is ambiguous" 오류가 난다. 항상 str 또는 None만
+    반환하도록 타입을 명시적으로 검사한다."""
+    try:
+        name = krx.get_market_ticker_name(code)
+    except Exception:
+        return None
+    return name if isinstance(name, str) and name else None
 
-    for code, name in MAJOR_STOCKS.items():
-        if name == query:
-            return code, name
 
-    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
-        raise ValueError(
-            f"'{query}'는 종목코드가 아니라 종목명으로 보이는데, 종목명 검색에는 KRX 로그인 세션이 "
-            "필요합니다(KRX_ID/KRX_PW 미설정). 정확한 6자리 종목코드를 입력해 주세요."
-        )
+def _normalize_stock_name(name: str) -> str:
+    """종목명 비교용 정규화: 앞뒤/내부 공백 차이(예: "LG 에너지솔루션" vs "LG에너지솔루션")로
+    같은 종목이 다르게 취급되지 않도록 모든 공백을 제거한다. 우선주 접미사("우"/"2우B" 등)는
+    KRX 공식 종목명에 이미 포함되어 있으므로 그대로 두어 보통주와 자동으로 구별되게 한다."""
+    return re.sub(r"\s+", "", name.strip())
 
+
+# 종목명 -> (코드, 공식종목명) 매핑 캐시. 요청마다 KOSPI/KOSDAQ 수천 종목을 스캔하면 느리고
+# 불필요한 API 호출이 반복되므로, 날짜(영업일) 단위로 한 번만 구축해 재사용한다.
+_TICKER_NAME_MAP_CACHE: dict[str, dict[str, tuple[str, str]]] = {}
+
+
+def _build_ticker_name_map(target_date: dt.date) -> dict[str, tuple[str, str]]:
     date_str = target_date.strftime("%Y%m%d")
+    cached = _TICKER_NAME_MAP_CACHE.get(date_str)
+    if cached is not None:
+        return cached
+
+    name_map: dict[str, tuple[str, str]] = {}
     for market in ("KOSPI", "KOSDAQ"):
         try:
             tickers = krx.get_market_ticker_list(date_str, market=market)
         except Exception:
             continue
         for code in tickers:
-            try:
-                name = krx.get_market_ticker_name(code)
-            except Exception:
-                continue
-            if name == query:
-                return code, name
+            name = _safe_ticker_name(code)
+            if name:
+                name_map[_normalize_stock_name(name)] = (code, name)
 
-    raise ValueError(f"'{query}'에 해당하는 국내 종목을 찾을 수 없습니다. 정확한 종목코드(6자리)를 입력해 주세요.")
+    if name_map:
+        # 날짜별로 하나만 유지한다(장기 실행 시 메모리 누적 방지 - 진단 기능은 항상 "오늘"
+        # 기준으로만 호출되므로 여러 날짜를 동시에 캐싱할 필요가 없다).
+        _TICKER_NAME_MAP_CACHE.clear()
+        _TICKER_NAME_MAP_CACHE[date_str] = name_map
+    return name_map
+
+
+def resolve_domestic_ticker(query: str, target_date: dt.date) -> tuple[str, str]:
+    """보유 종목 진단 기능에서 사용자가 입력한 "종목명 또는 종목코드"를 (코드, 공식종목명)
+    튜플로 변환한다. 이후 시세/수급 조회와 LLM 프롬프트는 항상 이 함수가 반환한 코드만을
+    기준(Primary Key)으로 사용해야 한다 - 같은 종목을 이름으로 입력하든 코드로 입력하든
+    반드시 동일한 (코드, 이름) 쌍으로 수렴시켜, 입력 형태에 따라 조회 결과나 LLM 진단이
+    달라지는 문제를 원천 차단한다.
+
+    1) 6자리 숫자면 종목코드로 간주하고 공식 이름만 조회한다(get_market_ticker_name은 단건
+       조회라 로그인 없이도 동작함 - 실제로 확인함). 존재하지 않는 코드면 즉시 에러.
+    2) 그 외 문자열이면 종목명으로 간주해 공백 차이를 무시하고 비교한다:
+       a) 먼저 고정 유니버스(MAJOR_STOCKS)에서 빠르게 찾는다.
+       b) 없으면 KRX 전체 종목명 매핑(_build_ticker_name_map, 날짜별 캐시)에서 찾는다 -
+          우선주(예: "삼성전자우")도 KRX 공식 목록에 별도 종목명으로 등록되어 있으므로
+          보통주와 자동으로 구별된다. 이 전체 목록 조회는 투자자별 거래실적 조회와
+          마찬가지로 KRX 로그인 세션이 필요하므로, 로그인 정보가 없으면 반복 실패 대신
+          즉시 명확한 에러로 안내한다.
+    """
+    raw_query = query.strip()
+    if re.fullmatch(r"\d{6}", raw_query):
+        name = _safe_ticker_name(raw_query)
+        if not name:
+            raise ValueError(f"'{raw_query}' 종목코드에 해당하는 종목을 찾을 수 없습니다.")
+        return raw_query, name
+
+    normalized_query = _normalize_stock_name(raw_query)
+
+    for code, name in MAJOR_STOCKS.items():
+        if _normalize_stock_name(name) == normalized_query:
+            return code, name
+
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        raise ValueError(
+            f"'{raw_query}'는 종목코드가 아니라 종목명으로 보이는데, 종목명 검색에는 KRX 로그인 세션이 "
+            "필요합니다(KRX_ID/KRX_PW 미설정). 정확한 6자리 종목코드를 입력해 주세요."
+        )
+
+    name_map = _build_ticker_name_map(target_date)
+    match = name_map.get(normalized_query)
+    if match:
+        return match
+
+    raise ValueError(f"'{raw_query}'에 해당하는 국내 종목을 찾을 수 없습니다. 정확한 종목코드(6자리)를 입력해 주세요.")
 
 
 def _fetch_stock_technical(code: str, name: str, target_date: dt.date) -> dict:
