@@ -27,8 +27,15 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.gzip import GZipMiddleware
 
-from collector import collect_market_data
-from pb_engine import OUTPUT_PATH_DEFAULT, diagnose_stock_holding, generate_pb_report_async
+from collector import _to_date, collect_market_data
+from pb_engine import (
+    OUTPUT_PATH_DEFAULT,
+    diagnose_stock_holding,
+    generate_pb_report_async,
+    is_cache_eligible_date,
+    _load_cached_report,
+    save_report,
+)
 
 # Windows 콘솔 기본 인코딩(cp949)에서 한글 로그가 깨지는 것을 방지
 for _stream in (sys.stdout, sys.stderr):
@@ -135,6 +142,20 @@ async def run_report_pipeline(target_date: Optional[str] = None, provider: Optio
 
     _generation_status.update(running=True, last_started_at=_now_iso(), last_error=None)
     try:
+        resolved_date = _to_date(target_date)
+
+        # 이미 장이 마감된 과거 날짜는 데이터가 더 이상 바뀌지 않는 확정 기록이므로, 캐시가
+        # 있으면 수집(collect_market_data)/LLM 호출을 전부 건너뛰고 그대로 재사용한다 - 같은
+        # 기준일을 반복 조회해도 100% 동일한 리포트가 나오는 것을 보장하는 방법은 이것뿐이다
+        # (temperature를 낮춰도 호스티드 LLM API 자체는 완전한 결정성을 보장하지 않는다).
+        if is_cache_eligible_date(resolved_date):
+            cached = _load_cached_report(resolved_date)
+            if cached is not None:
+                logger.info("과거 확정 일자(%s) 캐시 히트 - 재수집/LLM 호출 없이 즉시 반환합니다.", resolved_date)
+                save_report(cached, OUTPUT_PATH_DEFAULT)
+                _generation_status.update(last_success=_now_iso(), last_error=None)
+                return cached
+
         logger.info("리포트 생성 시작 (target_date=%s, provider=%s)", target_date, provider)
         # collect_market_data는 동기/블로킹 함수이므로 스레드풀로 위임해 이벤트 루프를 막지 않는다.
         market_data = await run_in_threadpool(collect_market_data, target_date)

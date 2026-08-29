@@ -6,6 +6,7 @@ __pycache__/
 # 백엔드 환경 변수 / 런타임 산출물
 .env
 pb_report_latest.json
+reports_cache/
 
 # Claude Code 세션 로컬 상태
 .claude/

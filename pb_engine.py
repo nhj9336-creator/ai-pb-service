@@ -44,6 +44,12 @@ LLM_TIMEOUT_SECONDS = 110  # LLM 응답이 이보다 오래 걸리면 실패로 
 # (기존 90초에서 상향: market_overview에 요구사항이 늘며 Task A 단일 호출이 90초를 넘겨
 # "504 Deadline expired" 오류가 발생한 사례가 있었다. Task A를 A/A2로 쪼개 태스크당 응답
 # 시간 자체도 줄였지만, 여유를 더 두기 위해 타임아웃도 함께 늘렸다.)
+LLM_TEMPERATURE = 0.2  # 기존 0.4에서 하향: 같은 기준일을 반복 조회했을 때 문장이 크게
+# 달라지는 문제를 줄이기 위함. 다만 temperature를 0으로 낮춰도 호스티드 LLM API는 완전한
+# 결정성을 보장하지 않으므로(부동소수점 연산 순서, 내부 라우팅 등), 진짜 100% 동일 응답
+# 보장은 아래 REPORT_CACHE_DIR 기반의 "과거 확정일자 캐싱"이 담당한다 - temperature는 이를
+# 보조하는 장치일 뿐이다. 0.0까지 낮추지 않은 이유는 모든 응답(오늘자 장중 리포트 포함)이
+# 지나치게 기계적/반복적인 문체가 되는 품질 저하를 피하기 위함이다.
 
 # 추천 종목 개수는 collector의 종목 유니버스 크기와 항상 일치시킨다(유니버스 전체가
 # 분석·랭킹되어 프론트엔드 "더보기"로 전부 확인 가능하도록).
@@ -357,7 +363,10 @@ def _build_task_a_prompt(context: dict) -> str:
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
     freshness_label = context.get("data_freshness_label") or "시장 데이터"
     return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 지수/수급/거시경제 데이터입니다.
-data_freshness가 "intraday"이면 당일 공식 종가가 아직 확정되지 않은 장중 시점이라는 뜻이므로, 이 시각 이후 시세가 더 움직일 수 있다는 점을 summary 초반에 자연스럽게 밝힐 것("장중 실시간 기준"임을 명시). data_freshness가 "market_closed"이면 당일 확정 마감 데이터이므로 그렇게 서술할 것(장중이라고 지어내지 말 것).
+data_freshness가 "intraday"이면 당일 공식 종가가 아직 확정되지 않은 장중 시점이라는 뜻이므로, 이 시각 이후 시세가 더 움직일 수 있다는 점을 summary 초반에 자연스럽게 밝힐 것("장중 실시간 기준"임을 명시).
+data_freshness가 "market_closed"이면 target_date의 모든 수치가 이미 확정·마감된 과거 기록이라는 뜻이다. 이 경우:
+  - "장중", "실시간", "현재", "지금 이 시각" 등 시점이 계속 흘러가고 있음을 암시하는 표현을 절대 쓰지 말 것 - target_date 하루치의 확정된 결과를 서술하는 정적인 기록임을 명심할 것.
+  - 오직 [시장 데이터]에 주어진 target_date 기준 확정 수치만을 근거로 객관적이고 일관되게 작성할 것 - 매번 다른 뉘앙스나 추측을 섞지 말고, 같은 데이터라면 같은 결론(전략 의견/수급 판정)에 도달해야 한다.
 응답은 각 필드에 명시된 문장 수를 넘기지 말고 핵심만 간결하게 작성할 것(응답 생성 시간 단축을 위함).
 
 [시장 데이터]
@@ -390,6 +399,7 @@ def _build_task_a2_prompt(context: dict) -> str:
     context_str = json.dumps(context, ensure_ascii=False, indent=2)
     freshness_label = context.get("data_freshness_label") or "시장 데이터"
     return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 지수/거시경제 데이터입니다.
+data_freshness_label이 "장마감 데이터 분석"이면 target_date에 이미 확정된 과거 기록을 다루는 것이므로 "장중"/"실시간"/"지금" 같은 표현을 쓰지 말고, 주어진 확정 수치만으로 객관적이고 일관된 판단을 내릴 것.
 응답은 각 필드에 명시된 문장 수를 넘기지 말고 핵심만 간결하게 작성할 것(응답 생성 시간 단축을 위함).
 
 [시장 데이터]
@@ -418,6 +428,7 @@ def _build_stock_task_prompt(
         else ""
     )
     return f"""아래는 {context.get('target_date')} 기준, {context.get('analysis_timestamp')}({freshness_label})에 수집된 종목별 기술적 지표 데이터입니다.
+data_freshness_label이 "장마감 데이터 분석"이면 target_date에 이미 확정된 과거 기록을 다루는 것이므로 "장중"/"실시간"/"지금" 같은 표현을 쓰지 말고, 주어진 확정 수치만으로 객관적이고 일관된 판단을 내릴 것.
 market_stance는 이미 확정된 이번 리포트의 시장 총평 결론이다 - 아래 entry_signal 판정은 반드시 이 결론과 모순되지 않아야 한다([매우 중요] 규칙 참고).
 
 [시장 총평 결론(market_stance) - 이미 확정됨, 재해석하지 말고 그대로 전제할 것]
@@ -556,7 +567,7 @@ def _call_openai(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         response_format={"type": "json_object"},
-        temperature=0.4,
+        temperature=LLM_TEMPERATURE,
     )
     return response.choices[0].message.content
 
@@ -577,7 +588,7 @@ def _call_gemini(system_prompt: str, user_prompt: str) -> str:
         user_prompt,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
-            temperature=0.4,
+            temperature=LLM_TEMPERATURE,
         ),
         # SDK 기본 타임아웃이 너무 길어질 수 있어 명시적으로 짧게 설정한다(요청 락 장시간
         # 점유 방지).
@@ -611,7 +622,7 @@ async def _call_openai_async(system_prompt: str, user_prompt: str) -> str:
             {"role": "user", "content": user_prompt},
         ],
         response_format={"type": "json_object"},
-        temperature=0.4,
+        temperature=LLM_TEMPERATURE,
     )
     return response.choices[0].message.content
 
@@ -630,7 +641,7 @@ async def _call_gemini_async(system_prompt: str, user_prompt: str) -> str:
         user_prompt,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
-            temperature=0.4,
+            temperature=LLM_TEMPERATURE,
         ),
         request_options={"timeout": LLM_TIMEOUT_SECONDS},
     )
@@ -774,6 +785,43 @@ def save_report(report: dict, output_path: str = OUTPUT_PATH_DEFAULT) -> str:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     return output_path
+
+
+# 이미 장이 마감된 과거 날짜는 데이터가 더 이상 바뀌지 않는 확정 기록이므로, 같은 날짜를
+# 반복 조회해도 매번 LLM을 새로 호출하지 않고 최초 생성분을 그대로 재사용한다 - "같은
+# 기준일이면 100% 동일한 리포트"를 보장하는 유일한 방법이며(temperature를 아무리 낮춰도
+# 호스티드 LLM API 자체는 완전한 결정성을 보장하지 않음), API 비용도 절감된다. 오늘 날짜는
+# 절대 이 캐시를 타지 않는다(장중에는 매 조회마다 최신 데이터를 반영해야 하므로).
+REPORT_CACHE_DIR = "reports_cache"
+
+
+def _report_cache_path(target_date: dt.date) -> str:
+    return os.path.join(REPORT_CACHE_DIR, f"{target_date.isoformat()}.json")
+
+
+def _load_cached_report(target_date: dt.date) -> Optional[dict]:
+    path = _report_cache_path(target_date)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        # 캐시 파일이 손상됐어도 캐시 미스로 취급해 정상적으로 재생성하면 되므로, 여기서
+        # 예외를 전파해 전체 리포트 생성을 실패시키지 않는다.
+        return None
+
+
+def _save_report_cache(report: dict, target_date: dt.date) -> None:
+    os.makedirs(REPORT_CACHE_DIR, exist_ok=True)
+    with open(_report_cache_path(target_date), "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+
+def is_cache_eligible_date(target_date: dt.date) -> bool:
+    """과거(오늘 이전) 확정 날짜에 대해서만 캐시를 적용한다. 오늘은 장중 등 데이터가 계속
+    바뀔 수 있으므로 항상 새로 생성하며 캐시를 절대 타지 않는다."""
+    return target_date < _now_kst().date()
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +996,11 @@ async def generate_pb_report_async(
     }
 
     save_report(report, output_path)
+    if is_cache_eligible_date(resolved_date):
+        # 과거 확정 일자는 데이터가 더 이상 바뀌지 않으므로, 이번에 생성한 결과를 그대로
+        # 저장해 같은 날짜를 다시 조회할 때 LLM을 재호출하지 않고 재사용한다(run_report_pipeline
+        # 참고 - 실제 캐시 히트 시에는 collect_market_data/LLM 호출 자체를 건너뛴다).
+        _save_report_cache(report, resolved_date)
     return report
 
 
