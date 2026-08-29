@@ -60,7 +60,11 @@ class GenerationInProgressError(RuntimeError):
 # TTL을 넘기면 죽은 락으로 간주하고 강제로 회수하는 워치독을 추가한다.
 _generation_lock = threading.Lock()
 _generation_started_monotonic: Optional[float] = None
-GENERATION_LOCK_TTL_SECONDS = 120  # 2분
+# pb_engine의 LLM_TIMEOUT_SECONDS(태스크당 110초) x MAX_GENERATION_ATTEMPTS(2회 재시도)를
+# 감안한 여유값. 5개 태스크가 2단계(phase1: A/A2/D 동시, phase2: B/C 동시)로 실행되므로
+# 이론상 최악의 경우(각 단계에서 태스크가 매번 재시도) 총 소요가 440초에 근접할 수 있어,
+# 그보다 낙낙하게 잡아 정상 실행 중인 락을 워치독이 성급하게 회수하지 않도록 한다.
+GENERATION_LOCK_TTL_SECONDS = 300  # 5분
 
 
 def _acquire_generation_lock() -> bool:
