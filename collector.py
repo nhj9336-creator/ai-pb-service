@@ -104,6 +104,13 @@ TREND_CHANNEL_LOOKBACK = 60  # 대각선 추세선(고점-고점/저점-저점) 
 PIVOT_LOOKBACK_DAYS = 5  # 피봇 포인트 계산에 사용할 최근 거래일수(주간 단위 - 전일 단순 피봇 대비 굵직한 지지/저항선)
 DART_LOOKBACK_DAYS = 7
 DART_UNIVERSE_SIZE = 20  # DART 공시를 조회할 시가총액 상위 종목 수
+
+# 국내 추천 종목 유니버스를 대형주(MAJOR_STOCKS)에만 묶어두지 않고 코스피/코스닥 전체
+# 시장에서 당일 수급이 실제로 몰린 중소형주까지 매일 동적으로 편입하기 위한 1차 기계적
+# 스크리닝 설정.
+SCREENING_ADDITIONAL_COUNT = 10  # MAJOR_STOCKS에 추가로 편입할 스크리닝 후보 수
+SCREENING_MIN_CHANGE_PCT = 0.0  # 이 등락률(%) 초과인 종목만 후보로 본다(하락 종목 제외)
+SCREENING_MAX_CHANGE_PCT = 29.5  # 상한가 근접(가격제한폭 ±30%) 종목은 추격 매수 위험이 커 제외
 DART_DISCLOSURES_PER_STOCK = 3  # 종목당 프롬프트에 넘길 최근 공시 개수(유니버스 확대에 따른 과다 방지)
 DART_MAX_WORKERS = 5  # DART 공시 조회 동시 요청 수 상한
 NEWS_MAX_WORKERS = 4  # 뉴스 RSS 쿼리 동시 요청 수 상한
@@ -756,6 +763,59 @@ def _parallel_fetch(
     return {"data": result, "errors": errors}
 
 
+def screen_momentum_candidates(
+    target_date: dt.date, exclude_codes: set[str], top_n: int = SCREENING_ADDITIONAL_COUNT
+) -> dict[str, str]:
+    """코스피/코스닥 전체 시장에서 당일 수급이 실제로 몰린 중소형주 후보를 기계적으로
+    골라낸다({코드: 종목명} 반환).
+
+    1차 필터는 순수하게 객관적 수치(등락률·거래대금)만 사용한다 - 뉴스/차트 패턴에 대한
+    정성적 판단은 여기서 하지 않고, 이 함수가 골라낸 후보 각각에 대해 이후 단계
+    (collect_technical_data -> AI 태스크)가 전체 기술적 지표를 계산하고 entry_signal을
+    엄밀하게 재판정한다. 즉 이 스크리닝을 통과했다고 "진입유효"가 보장되는 것이 아니라,
+    "분석 대상 후보"로 넓히는 역할만 한다.
+
+    선정 기준: 상승 마감(등락률 > 0, 상한가 근접은 추격매수 위험으로 제외)한 종목 중
+    거래대금(당일 실제로 몰린 자금 규모 - 수급의 직접적 증거) 상위 top_n개.
+    우선주/스팩 등은 코드 마지막 자리가 "0"이 아닌 경우가 많아 제외한다(기존 DART 유니버스
+    선정과 동일 규칙).
+
+    KRX 로그인 세션(KRX_ID/KRX_PW)이 없거나 조회에 실패하면 빈 dict를 반환한다 - 이 스크리닝은
+    부가 기능이라 실패해도 호출부가 MAJOR_STOCKS만으로 안전하게 계속 진행해야 한다.
+    """
+    if not (os.getenv("KRX_ID") and os.getenv("KRX_PW")):
+        return {}
+
+    date_str = target_date.strftime("%Y%m%d")
+
+    def _fetch() -> pd.DataFrame:
+        # 코스피+코스닥 전체를 단일 호출로 가져온다(종목별 반복 호출이 아니므로 수천
+        # 종목을 스캔해도 빠르다).
+        return krx.get_market_ohlcv_by_ticker(date_str, market="ALL")
+
+    try:
+        df = _retry_with_backoff(_fetch, context="momentum_screen")
+    except Exception as exc:
+        logger.warning("시장 전체 모멘텀 스크리닝 실패(대형주 유니버스만 사용): %s", exc)
+        return {}
+    if df is None or df.empty or "등락률" not in df.columns or "거래대금" not in df.columns:
+        return {}
+
+    df = df[df.index.to_series().str.fullmatch(r"\d{5}0")]  # 우선주/스팩 추정 코드 제외(마지막 자리 "0"인 보통주만)
+    df = df[~df.index.isin(exclude_codes)]
+    df = df[(df["등락률"] > SCREENING_MIN_CHANGE_PCT) & (df["등락률"] < SCREENING_MAX_CHANGE_PCT)]
+    if df.empty:
+        return {}
+
+    top = df.sort_values("거래대금", ascending=False).head(top_n)
+    candidates: dict[str, str] = {}
+    for code in top.index:
+        name = _safe_ticker_name(str(code))
+        if name:
+            candidates[str(code)] = name
+    return candidates
+
+
 def collect_technical_data(target_date: dt.date, stocks: Optional[dict] = None) -> dict:
     """국내(KRX) 종목의 기술적 지표를 병렬로 수집한다."""
     stocks = stocks or MAJOR_STOCKS
@@ -833,8 +893,11 @@ def _fetch_top_market_cap_codes(target_date: dt.date, top_n: int = DART_UNIVERSE
     # DART는 법인 단위로만 공시를 관리해 우선주 자체의 고유 조회 코드가 없는 경우가 많다.
     # 시가총액 상위권에 우선주가 섞여 있으면 대부분 그 본주도 이미 상위권에 있으므로,
     # DART 조회 대상 선정 단계에서부터 우선주로 추정되는 코드는 제외해 불필요한 조회
-    # 실패를 원천 차단한다(코드 자체는 마지막 자리 "0"인 것을 보통주로 간주).
-    df = df[df.index.to_series().str.fullmatch(r"\d{6}0")]
+    # 실패를 원천 차단한다(코드 자체는 마지막 자리 "0"인 것을 보통주로 간주 - 6자리 코드
+    # 전체가 "5자리 숫자 + 마지막 0"이어야 하므로 정규식은 \d{5}0이어야 한다. 기존에
+    # \d{6}0(7자리 요구)로 잘못 작성돼 있어 fullmatch가 실제로는 단 하나도 통과시키지
+    # 못하던 버그를 이번에 함께 고쳤다).
+    df = df[df.index.to_series().str.fullmatch(r"\d{5}0")]
     if df.empty:
         return {}
     top = df.sort_values("시가총액", ascending=False).head(top_n)
@@ -1012,16 +1075,25 @@ def collect_market_data(target_date: DateLike = None) -> dict:
     """
     resolved_date = _to_date(target_date)
 
+    # 국내 추천 종목 유니버스를 대형주(MAJOR_STOCKS)로만 고정하지 않고, 코스피/코스닥 전체
+    # 시장에서 당일 수급이 몰린 중소형주까지 매일 동적으로 편입한다(screen_momentum_candidates
+    # 참고). 이 스크리닝은 이후 병렬 섹션들이 쓸 "종목 유니버스"를 정하는 선행 단계라
+    # section_jobs 병렬 실행 전에 동기적으로 먼저 끝내야 한다 - 단일 벌크 조회라 오래
+    # 걸리지 않는다. 실패해도(로그인 미설정 등) 예외를 던지지 않고 빈 결과를 반환하므로
+    # MAJOR_STOCKS만으로 안전하게 계속 진행된다.
+    domestic_universe = dict(MAJOR_STOCKS)
+    domestic_universe.update(screen_momentum_candidates(resolved_date, exclude_codes=set(MAJOR_STOCKS)))
+
     # 6개 섹션은 서로 데이터 의존성이 없으므로(indices/technical_domestic/technical_us/
     # macro/dart/news) 순차 실행 대신 동시에 실행해 전체 소요 시간을 단축한다. 각 섹션은
     # 이미 내부적으로도 병렬화되어 있고 _run_section이 예외를 흡수하므로, 여기서 하나가
     # 오래 걸리거나 실패해도 다른 섹션에는 영향이 없다.
     section_jobs = {
         "indices": (collect_index_and_flow_data, (resolved_date,)),
-        "technical_domestic": (collect_technical_data, (resolved_date,)),
+        "technical_domestic": (collect_technical_data, (resolved_date, domestic_universe)),
         "technical_us": (collect_us_technical_data, (resolved_date,)),
         "macro": (collect_macro_data, (resolved_date,)),
-        "dart": (collect_dart_disclosures, (resolved_date,)),
+        "dart": (collect_dart_disclosures, (resolved_date, domestic_universe)),
         "news": (collect_news_data, ()),
     }
     with ThreadPoolExecutor(max_workers=len(section_jobs)) as executor:

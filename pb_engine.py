@@ -51,28 +51,36 @@ LLM_TEMPERATURE = 0.2  # 기존 0.4에서 하향: 같은 기준일을 반복 조
 # 보조하는 장치일 뿐이다. 0.0까지 낮추지 않은 이유는 모든 응답(오늘자 장중 리포트 포함)이
 # 지나치게 기계적/반복적인 문체가 되는 품질 저하를 피하기 위함이다.
 
-# 추천 종목 개수는 collector의 종목 유니버스 크기와 항상 일치시킨다(유니버스 전체가
-# 분석·랭킹되어 프론트엔드 "더보기"로 전부 확인 가능하도록).
+# 국내 추천 종목은 이제 매일 동적으로 확장된다(MAJOR_STOCKS 대형주 + 당일 시장 전체
+# 스크리닝으로 찾은 중소형주, screen_momentum_candidates 참고) - 최종 개수가 고정값이
+# 아니므로 DOMESTIC_RECOMMENDATION_COUNT는 "분석 대상에 항상 포함되는 대형주 앵커 수"만
+# 의미한다(스크립트/픽스처에서 참고용으로만 사용). 미국은 여전히 고정 유니버스라 정확한 개수다.
 DOMESTIC_RECOMMENDATION_COUNT = len(MAJOR_STOCKS)
 US_RECOMMENDATION_COUNT = len(US_STOCKS)
 NEWS_IMPACT_COUNT = 10  # 프론트엔드 "뉴스 더보기"에서 전부 노출할 주요 뉴스 분석 개수
 
 
-def _split_dict_evenly(d: dict, n: int) -> list[dict]:
-    """d를 원소 순서를 보존한 채 n개의 (거의) 균등한 부분 dict로 나눈다."""
+def _chunk_dict(d: dict, chunk_size: int) -> list[dict]:
+    """d를 원소 순서를 보존한 채 chunk_size개씩 잘라 여러 부분 dict로 나눈다(그룹 개수는
+    len(d)에 비례해 자연스럽게 늘어난다 - 국내 유니버스가 매일 스크리닝으로 달라지므로
+    고정 그룹 개수 대신 그룹당 크기를 고정한다). d가 비어있으면 빈 리스트를 반환한다(빈
+    dict짜리 "그룹 1개"를 만들면 호출부의 next(iter(group))가 StopIteration으로 죽는다)."""
     items = list(d.items())
-    size = -(-len(items) // n)  # 올림 나눗셈
-    return [dict(items[i : i + size]) for i in range(0, len(items), size)] or [dict()]
+    return [dict(items[i : i + chunk_size]) for i in range(0, len(items), chunk_size)]
 
 
 # 종목별 PB 전략 노트(Task B/C)는 종목 하나하나에 3~4문장 buy_point + 진입 시그널 등 상세
-# 필드를 채워야 해서 응답량이 많다 - 유니버스 전체(국내 12개/미국 10개)를 한 호출에 몰아
-# 넣으면 LLM_TIMEOUT_SECONDS를 넘겨 "504 Deadline expired" 오류가 나는 사례가 있었다(Task A를
-# A/A2로 쪼갠 것과 같은 원인). 종목 그룹을 2개씩으로 쪼개 태스크당 응답량을 절반으로 줄이고,
-# 여전히 asyncio.gather로 전부 동시에 호출해 전체 지연은 거의 늘지 않게 한다.
-STOCK_GROUP_COUNT = 2
-DOMESTIC_STOCK_GROUPS: list[dict[str, str]] = _split_dict_evenly(MAJOR_STOCKS, STOCK_GROUP_COUNT)
-US_STOCK_GROUPS: list[dict[str, str]] = _split_dict_evenly(US_STOCKS, STOCK_GROUP_COUNT)
+# 필드를 채워야 해서 응답량이 많다 - 유니버스 전체를 한 호출에 몰아넣으면 LLM_TIMEOUT_SECONDS를
+# 넘겨 "504 Deadline expired" 오류가 나는 사례가 있었다(Task A를 A/A2로 쪼갠 것과 같은 원인).
+# 종목 그룹을 STOCK_GROUP_SIZE개씩으로 쪼개 태스크당 응답량을 줄이고, 여전히 asyncio.gather로
+# 전부 동시에 호출해 전체 지연은 거의 늘지 않게 한다. 국내/미국 모두 실제 수집 결과(기술적
+# 지표 수집에 성공한 종목만)를 기준으로 요청마다 동적으로 나눈다(generate_pb_report_async
+# 참고) - 국내는 스크리닝으로 유니버스 크기 자체가 매일 달라지고, 미국은 유니버스는
+# 고정이어도 개별 종목의 수집이 실패할 수 있어 그 경우 그룹에서 자연스럽게 제외돼야 한다.
+STOCK_GROUP_SIZE = 6
+# 참고용 상수(테스트 등에서 "유니버스 전원 수집 성공 시 미국 그룹이 몇 개인지" 확인할 때
+# 사용) - 오케스트레이터 본체는 이제 이 상수를 직접 쓰지 않고 매번 새로 계산한다.
+US_STOCK_GROUPS: list[dict[str, str]] = _chunk_dict(US_STOCKS, STOCK_GROUP_SIZE)
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
@@ -868,6 +876,30 @@ async def _generate_task(
     raise RuntimeError(f"Task {task_name} 생성에 {MAX_GENERATION_ATTEMPTS}회 실패했습니다: {last_error}") from last_error
 
 
+def _filter_recommendations(stocks: list[dict], anchor_codes: set[str]) -> list[dict]:
+    """추천 종목 노출 정책을 적용한다.
+
+    기본: entry_signal이 진입유효/눌림목대기인 종목만 통과시킨다(아직 진입 타이밍이 아닌
+    진입보류·고점매수주의는 기본 노출 대상에서 제외).
+
+    예외: 하락장 등 객관적 지표 기준으로 진입유효/눌림목대기가 단 하나도 없으면, 대형주
+    (anchor_codes) 중 진입보류 종목만 리스크 관리 관점에서 대신 노출한다 - 중소형주의
+    진입보류까지 보여주면 유동성/변동성 리스크가 커 안전장치로서의 의미가 옅어진다.
+    그마저도 없으면(극단적 예외) 전체 종목 중 진입보류로, 그래도 없으면 있는 그대로
+    노출해 화면이 완전히 비지 않게 한다.
+    """
+    preferred = [s for s in stocks if s.get("entry_signal") in ("진입유효", "눌림목대기")]
+    if preferred:
+        return preferred
+
+    anchor_hold = [s for s in stocks if s.get("entry_signal") == "진입보류" and s.get("ticker") in anchor_codes]
+    if anchor_hold:
+        return anchor_hold
+
+    any_hold = [s for s in stocks if s.get("entry_signal") == "진입보류"]
+    return any_hold or stocks
+
+
 async def generate_pb_report_async(
     target_date: DateLike = None,
     provider: Optional[str] = None,
@@ -948,15 +980,27 @@ async def generate_pb_report_async(
             }
         return ctx
 
-    # 국내(B)/미국(C) 종목 태스크를 그룹(STOCK_GROUP_COUNT개)으로 쪼개 동시 실행한다 - 유니버스
+    # 국내 유니버스는 스크리닝으로 매일 종목 수가 달라지고(screen_momentum_candidates 참고),
+    # 국내/미국 모두 기술적 지표 수집에 실패한 종목(technical 값이 None)은 AI가 분석할
+    # 데이터 자체가 없으므로 그룹 구성에서 제외한다(포함하면 근거 없는 내용을 지어낼 수밖에
+    # 없다) - 그래서 두 시장 모두 고정 상수가 아니라 실제 수집 결과에서 매 요청마다 그룹을
+    # 다시 만든다.
+    domestic_technical = {
+        code: t for code, t in full_context["technical"]["domestic"].items() if t is not None
+    }
+    us_technical = {code: t for code, t in full_context["technical"]["us"].items() if t is not None}
+    domestic_groups = _chunk_dict(domestic_technical, STOCK_GROUP_SIZE)
+    us_groups = _chunk_dict(us_technical, STOCK_GROUP_SIZE)
+
+    # 국내(B)/미국(C) 종목 태스크를 그룹(STOCK_GROUP_SIZE개씩)으로 쪼개 동시 실행한다 - 유니버스
     # 전체를 한 호출에 몰아넣으면 응답량이 많아 LLM_TIMEOUT_SECONDS를 초과하는 사례가 있었다.
     stock_task_specs: list[tuple[str, dict, Callable[[dict], str], Callable[[dict], None]]] = []
-    for i, group in enumerate(DOMESTIC_STOCK_GROUPS, start=1):
+    for i, group in enumerate(domestic_groups, start=1):
         ctx = _stock_group_context("domestic", group, include_dart=True)
         builder = _make_stock_group_prompt_builder("domestic", TASK_B_SCHEMA, len(group), next(iter(group)), True)
         validator = _make_stock_group_validator("domestic", len(group), f"recommended_stocks.domestic(그룹{i})")
         stock_task_specs.append((f"B{i}", ctx, builder, validator))
-    for i, group in enumerate(US_STOCK_GROUPS, start=1):
+    for i, group in enumerate(us_groups, start=1):
         ctx = _stock_group_context("us", group, include_dart=False)
         builder = _make_stock_group_prompt_builder("us", TASK_C_SCHEMA, len(group), next(iter(group)), False)
         validator = _make_stock_group_validator("us", len(group), f"recommended_stocks.us(그룹{i})")
@@ -993,6 +1037,13 @@ async def generate_pb_report_async(
                 stock["entry_signal_reason"] = (
                     "시장 총평이 비중축소 국면으로 판단되어, 개별 기술적 신호와 무관하게 신규 진입을 보류합니다."
                 )
+
+    # 노출 정책: 기본적으로 진입유효/눌림목대기 상태만 추천 목록에 보여준다(아직 진입
+    # 타이밍이 아닌 진입보류/고점매수주의는 기본 제외). 하락장 등 객관적 지표 기준으로
+    # 진입유효/눌림목대기가 단 하나도 없는 경우에 한해, 대형주(MAJOR_STOCKS/US_STOCKS) 중
+    # 진입보류 종목만 예외적으로 리스크 관리 관점에서 노출한다.
+    domestic_stocks = _filter_recommendations(domestic_stocks, set(MAJOR_STOCKS))
+    us_stocks = _filter_recommendations(us_stocks, set(US_STOCKS))
 
     report_body = {
         "market_overview": task_a["market_overview"],
