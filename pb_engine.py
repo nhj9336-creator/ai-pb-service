@@ -57,6 +57,23 @@ DOMESTIC_RECOMMENDATION_COUNT = len(MAJOR_STOCKS)
 US_RECOMMENDATION_COUNT = len(US_STOCKS)
 NEWS_IMPACT_COUNT = 10  # 프론트엔드 "뉴스 더보기"에서 전부 노출할 주요 뉴스 분석 개수
 
+
+def _split_dict_evenly(d: dict, n: int) -> list[dict]:
+    """d를 원소 순서를 보존한 채 n개의 (거의) 균등한 부분 dict로 나눈다."""
+    items = list(d.items())
+    size = -(-len(items) // n)  # 올림 나눗셈
+    return [dict(items[i : i + size]) for i in range(0, len(items), size)] or [dict()]
+
+
+# 종목별 PB 전략 노트(Task B/C)는 종목 하나하나에 3~4문장 buy_point + 진입 시그널 등 상세
+# 필드를 채워야 해서 응답량이 많다 - 유니버스 전체(국내 12개/미국 10개)를 한 호출에 몰아
+# 넣으면 LLM_TIMEOUT_SECONDS를 넘겨 "504 Deadline expired" 오류가 나는 사례가 있었다(Task A를
+# A/A2로 쪼갠 것과 같은 원인). 종목 그룹을 2개씩으로 쪼개 태스크당 응답량을 절반으로 줄이고,
+# 여전히 asyncio.gather로 전부 동시에 호출해 전체 지연은 거의 늘지 않게 한다.
+STOCK_GROUP_COUNT = 2
+DOMESTIC_STOCK_GROUPS: list[dict[str, str]] = _split_dict_evenly(MAJOR_STOCKS, STOCK_GROUP_COUNT)
+US_STOCK_GROUPS: list[dict[str, str]] = _split_dict_evenly(US_STOCKS, STOCK_GROUP_COUNT)
+
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
@@ -464,19 +481,17 @@ market_stance는 이미 확정된 이번 리포트의 시장 총평 결론이다
 """
 
 
-def _build_task_b_prompt(context: dict) -> str:
-    """Task B: 국내 종목 PB 전략 노트."""
-    return _build_stock_task_prompt(
-        context, "domestic", TASK_B_SCHEMA, DOMESTIC_RECOMMENDATION_COUNT, "005930", has_dart=True
-    )
+def _make_stock_group_prompt_builder(
+    market_key: str, schema: dict, count: int, ticker_example: str, has_dart: bool
+) -> Callable[[dict], str]:
+    """국내(B)/미국(C) 종목군을 여러 그룹으로 쪼갠 각 태스크(B1, B2, C1, C2, ...)에 쓸
+    프롬프트 빌더를 만든다. _build_stock_task_prompt는 이미 market_key/count 등을 인자로
+    받는 범용 함수이므로, 그룹별 고정값만 클로저로 미리 채워 넣는다."""
 
+    def _builder(context: dict) -> str:
+        return _build_stock_task_prompt(context, market_key, schema, count, ticker_example, has_dart)
 
-def _build_task_c_prompt(context: dict) -> str:
-    """Task C: 미국 종목 PB 전략 노트. DART는 국내 전자공시 시스템이라 미국 종목에는 데이터가
-    없으므로(has_dart=False), 프롬프트에서 DART 언급 자체를 하지 않는다."""
-    return _build_stock_task_prompt(
-        context, "us", TASK_C_SCHEMA, US_RECOMMENDATION_COUNT, "AAPL", has_dart=False
-    )
+    return _builder
 
 
 def _build_task_d_prompt(context: dict) -> str:
@@ -743,12 +758,13 @@ def _validate_stock_items(items: Any, expected_count: int, label: str) -> None:
             raise ValueError(f"{label} 항목의 entry_signal 값이 올바르지 않습니다: {item.get('entry_signal')!r}")
 
 
-def _validate_task_b(data: dict) -> None:
-    _validate_stock_items(data.get("domestic"), DOMESTIC_RECOMMENDATION_COUNT, "recommended_stocks.domestic")
+def _make_stock_group_validator(key: str, expected_count: int, label: str) -> Callable[[dict], None]:
+    """국내(B)/미국(C) 종목군 그룹별 검증기를 만든다(_make_stock_group_prompt_builder와 짝)."""
 
+    def _validator(data: dict) -> None:
+        _validate_stock_items(data.get(key), expected_count, label)
 
-def _validate_task_c(data: dict) -> None:
-    _validate_stock_items(data.get("us"), US_RECOMMENDATION_COUNT, "recommended_stocks.us")
+    return _validator
 
 
 def _validate_task_d(data: dict) -> None:
@@ -913,38 +929,45 @@ async def generate_pb_report_async(
         "strategy_rationale": task_a["market_overview"]["strategy_rationale"],
     }
 
-    context_b = {
-        "target_date": full_context["target_date"],
-        "analysis_timestamp": full_context["analysis_timestamp"],
-        "data_freshness_label": full_context["data_freshness_label"],
-        "market_stance": market_stance,
-        "technical": {"domestic": full_context["technical"]["domestic"]},
-        # 매수 관전포인트에 모멘텀/매크로 근거(실적 공시, 관련 뉴스, 금리 등)를 사실에
-        # 근거해 덧붙일 수 있도록 국내 종목 유니버스에 해당하는 공시만 추려 전달한다.
-        "dart_disclosures": {
-            code: v
-            for code, v in full_context["dart_disclosures"].items()
-            if code in full_context["technical"]["domestic"]
-        },
-        "macro": full_context["macro"],
-        "news": full_context["news"],
-    }
-    context_c = {
-        "target_date": full_context["target_date"],
-        "analysis_timestamp": full_context["analysis_timestamp"],
-        "data_freshness_label": full_context["data_freshness_label"],
-        "market_stance": market_stance,
-        "technical": {"us": full_context["technical"]["us"]},
-        # DART는 국내 전자공시 시스템이라 미국 종목에는 해당 데이터가 없으므로 dart_disclosures는
-        # 전달하지 않는다(has_dart=False와 짝을 맞춤).
-        "macro": full_context["macro"],
-        "news": full_context["news"],
-    }
+    def _stock_group_context(market_key: str, group: dict[str, str], include_dart: bool) -> dict:
+        technical_subset = {code: full_context["technical"][market_key].get(code) for code in group}
+        ctx = {
+            "target_date": full_context["target_date"],
+            "analysis_timestamp": full_context["analysis_timestamp"],
+            "data_freshness_label": full_context["data_freshness_label"],
+            "market_stance": market_stance,
+            "technical": {market_key: technical_subset},
+            "macro": full_context["macro"],
+            "news": full_context["news"],
+        }
+        if include_dart:
+            # 매수 관전포인트에 모멘텀/매크로 근거(실적 공시, 관련 뉴스, 금리 등)를 사실에
+            # 근거해 덧붙일 수 있도록 이 그룹의 종목에 해당하는 공시만 추려 전달한다.
+            ctx["dart_disclosures"] = {
+                code: v for code, v in full_context["dart_disclosures"].items() if code in group
+            }
+        return ctx
 
-    # 2단계: 국내(B)/미국(C) 종목 태스크 동시 실행.
+    # 국내(B)/미국(C) 종목 태스크를 그룹(STOCK_GROUP_COUNT개)으로 쪼개 동시 실행한다 - 유니버스
+    # 전체를 한 호출에 몰아넣으면 응답량이 많아 LLM_TIMEOUT_SECONDS를 초과하는 사례가 있었다.
+    stock_task_specs: list[tuple[str, dict, Callable[[dict], str], Callable[[dict], None]]] = []
+    for i, group in enumerate(DOMESTIC_STOCK_GROUPS, start=1):
+        ctx = _stock_group_context("domestic", group, include_dart=True)
+        builder = _make_stock_group_prompt_builder("domestic", TASK_B_SCHEMA, len(group), next(iter(group)), True)
+        validator = _make_stock_group_validator("domestic", len(group), f"recommended_stocks.domestic(그룹{i})")
+        stock_task_specs.append((f"B{i}", ctx, builder, validator))
+    for i, group in enumerate(US_STOCK_GROUPS, start=1):
+        ctx = _stock_group_context("us", group, include_dart=False)
+        builder = _make_stock_group_prompt_builder("us", TASK_C_SCHEMA, len(group), next(iter(group)), False)
+        validator = _make_stock_group_validator("us", len(group), f"recommended_stocks.us(그룹{i})")
+        stock_task_specs.append((f"C{i}", ctx, builder, validator))
+
+    # 2단계: 국내/미국 종목 그룹 태스크를 전부 동시 실행.
     phase2 = await asyncio.gather(
-        _generate_task("B", context_b, _build_task_b_prompt, _validate_task_b, provider),
-        _generate_task("C", context_c, _build_task_c_prompt, _validate_task_c, provider),
+        *(
+            _generate_task(name, ctx, builder, validator, provider)
+            for name, ctx, builder, validator in stock_task_specs
+        ),
         return_exceptions=True,
     )
     phase2_errors = [r for r in phase2 if isinstance(r, Exception)]
@@ -952,12 +975,19 @@ async def generate_pb_report_async(
         raise RuntimeError(
             f"PB 리포트 생성 중 {len(phase2_errors)}개 태스크가 실패했습니다: {phase2_errors[0]}"
         ) from phase2_errors[0]
-    task_b, task_c = phase2
+
+    domestic_stocks: list[dict] = []
+    us_stocks: list[dict] = []
+    for (name, _ctx, _builder, _validator), result in zip(stock_task_specs, phase2):
+        if name.startswith("B"):
+            domestic_stocks.extend(result["domestic"])
+        else:
+            us_stocks.extend(result["us"])
 
     # 결정론적 안전장치: 비중축소 국면에서는 개별 종목의 진입유효 시그널을 코드 레벨에서
     # 강제로 하향 조정해, LLM이 프롬프트 지시를 놓치더라도 시장 총평과의 모순을 원천 차단한다.
     if market_stance["pb_strategy_opinion"] == "비중축소":
-        for stock in [*task_b["domestic"], *task_c["us"]]:
+        for stock in [*domestic_stocks, *us_stocks]:
             if stock.get("entry_signal") == "진입유효":
                 stock["entry_signal"] = "진입보류"
                 stock["entry_signal_reason"] = (
@@ -968,8 +998,8 @@ async def generate_pb_report_async(
         "market_overview": task_a["market_overview"],
         "news_impact_analysis": task_d["news_impact_analysis"],
         "recommended_stocks": {
-            "domestic": task_b["domestic"],
-            "us": task_c["us"],
+            "domestic": domestic_stocks,
+            "us": us_stocks,
         },
         "financial_products": task_a2["financial_products"],
         "portfolio_allocation": task_a2["portfolio_allocation"],
